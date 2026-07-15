@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Low-Poly Water Flow</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { overflow: hidden; background: #1a1a2e; font-family: 'Segoe UI', system-ui, sans-serif; }
+  canvas { display: block; }
+
+  #ui {
+    position: fixed; top: 20px; left: 20px;
+    color: #eee; pointer-events: none; z-index: 10;
+    background: rgba(0,0,0,0.55); border-radius: 12px;
+    padding: 16px 20px; backdrop-filter: blur(6px);
+    border: 1px solid rgba(255,255,255,0.1);
+    font-size: 13px; line-height: 1.7; user-select: none;
+  }
+  #ui h1 { font-size: 18px; margin-bottom: 8px; font-weight: 700; letter-spacing: 0.5px; }
+  #ui .badge { display: inline-block; padding: 2px 10px; border-radius: 4px;
+    font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; }
+  #ui .badge.dig { background: #ff6b4a; color: #fff; }
+  #ui .badge.build { background: #7ec850; color: #1a1a2e; }
+  #ui .badge.on { background: #4499dd; color: #fff; }
+  #ui .badge.off { background: #555; color: #999; }
+  #ui kbd {
+    background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 3px; padding: 1px 6px; font-size: 11px; font-family: inherit; margin: 0 1px;
+  }
+  #ui .sep { color: rgba(255,255,255,0.3); margin: 0 6px; }
+  #ui .row { margin-top: 4px; color: #aaa; }
+</style>
+</head>
+<body>
+
+<div id="ui">
+  <h1>💧 Low-Poly Water Flow</h1>
+  <div>
+    <span class="badge dig" id="modeBadge">Dig</span>
+    <span class="sep">|</span>
+    Water: <span class="badge off" id="flowBadge">OFF</span>
+    <span class="sep">|</span>
+    Flow: <span id="flowRate">1.0</span>×
+    <span class="sep">|</span>
+    Vol: <span id="waterVol">0</span>
+  </div>
+  <div class="row"><kbd>Click</kbd>+drag dig &nbsp; <kbd>Shift</kbd>+drag build &nbsp; <kbd>B</kbd> toggle</div>
+  <div class="row"><kbd>Space</kbd> toggle &nbsp; <kbd>+/-</kbd> flow rate &nbsp; <kbd>Right-drag</kbd> orbit &nbsp; <kbd>Scroll</kbd> zoom</div>
+</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+}}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ═══ CONSTANTS ═══
+const TERRAIN_SIZE = 20;
+const GRID_RES = 55;
+const HALF = TERRAIN_SIZE / 2;
+const CELL = TERRAIN_SIZE / GRID_RES;
+
+const BRUSH_RADIUS = 1.5;
+const BRUSH_STRENGTH = 2.5;
+const MIN_HEIGHT = -5;
+const MAX_HEIGHT = 8;
+
+// Water — surface heightfield equalization
+const W_PASSES = 10;
+const W_FLOW = 0.12;
+const BASE_SOURCE_RATE = 1.0;
+let   flowMultiplier = 1.0;
+const FLOW_DELAY = 0.1;
+
+const SOURCE_X = -8.8;
+const SOURCE_Z = -8.8;
+
+// ═══ SCENE ═══
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.15;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#87CEEB');
+scene.fog = new THREE.Fog('#b8d4e8', 22, 52);
+
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.5, 100);
+camera.position.set(7, 11, 15);
+camera.lookAt(-3, 2, -3);
+
+// ═══ LIGHTING ═══
+scene.add(new THREE.AmbientLight('#bcd4f0', 1.5));
+const sun = new THREE.DirectionalLight('#fff8e7', 4.5);
+sun.position.set(15, 20, 5);
+sun.castShadow = true;
+sun.shadow.mapSize.set(1024, 1024);
+sun.shadow.camera.near = 0.5; sun.shadow.camera.far = 60;
+sun.shadow.camera.left = -15; sun.shadow.camera.right = 15;
+sun.shadow.camera.top = 15; sun.shadow.camera.bottom = -15;
+sun.shadow.bias = -0.0004;
+scene.add(sun);
+const fillLight = new THREE.DirectionalLight('#c8ddf8', 1.0);
+fillLight.position.set(-5, 3, -3);
+scene.add(fillLight);
+
+// ═══ HEIGHTMAP ═══
+const heightmap = [];
+for (let i = 0; i <= GRID_RES; i++) heightmap[i] = new Float32Array(GRID_RES + 1);
+
+function worldX(i) { return i * CELL - HALF; }
+function worldZ(j) { return j * CELL - HALF; }
+
+function initHeight(wx, wz) {
+  // Gentle overall slope
+  let h = 3.5 - (wx + HALF) * 0.1 - (wz + HALF) * 0.08;
+
+  // Rolling hills
+  h += Math.sin(wx * 0.45) * Math.cos(wz * 0.55) * 1.4;
+  h += Math.cos(wx * 0.75 + 1.2) * Math.sin(wz * 0.65 - 0.7) * 0.9;
+  h += Math.sin(wx * 1.1 - 1.8) * Math.cos(wz * 0.9 + 1.5) * 0.6;
+  h += Math.cos(wx * 1.5 + 0.3) * Math.sin(wz * 1.3 - 0.4) * 0.4;
+
+  // Raised edges
+  const ed = Math.min(wx + HALF, HALF - wx, wz + HALF, HALF - wz);
+  if (ed < 2.0) h += (2.0 - ed) * 2.5;
+
+  return THREE.MathUtils.clamp(h, MIN_HEIGHT, MAX_HEIGHT);
+}
+
+for (let i = 0; i <= GRID_RES; i++)
+  for (let j = 0; j <= GRID_RES; j++)
+    heightmap[i][j] = initHeight(worldX(i), worldZ(j));
+
+function getHeight(wx, wz) {
+  const gx = (wx + HALF) / CELL, gz = (wz + HALF) / CELL;
+  const ix = Math.max(0, Math.min(GRID_RES - 1, Math.floor(gx)));
+  const iz = Math.max(0, Math.min(GRID_RES - 1, Math.floor(gz)));
+  const fx = THREE.MathUtils.clamp(gx - ix, 0, 1), fz = THREE.MathUtils.clamp(gz - iz, 0, 1);
+  return (1 - fx) * (1 - fz) * heightmap[ix][iz] + fx * (1 - fz) * heightmap[ix + 1][iz]
+       + (1 - fx) * fz * heightmap[ix][iz + 1] + fx * fz * heightmap[ix + 1][iz + 1];
+}
+
+// ═══ TERRAIN MESH ═══
+function heightToColor(h) {
+  if (h < 0.2) return [0.82, 0.70, 0.55];
+  if (h < 1.0) return [0.55, 0.70, 0.35];
+  if (h < 2.2) return [0.42, 0.60, 0.28];
+  if (h < 3.2) return [0.55, 0.48, 0.38];
+  if (h < 4.5) return [0.60, 0.55, 0.50];
+  return [0.75, 0.73, 0.70];
+}
+
+const terrainGeo = new THREE.PlaneGeometry(TERRAIN_SIZE, TERRAIN_SIZE, GRID_RES, GRID_RES);
+terrainGeo.rotateX(-Math.PI / 2);
+const tPos = terrainGeo.attributes.position.array;
+const tCol = new Float32Array(tPos.length);
+for (let k = 0; k < tPos.length; k += 3) {
+  const h = getHeight(tPos[k], tPos[k + 2]);
+  tPos[k + 1] = h;
+  const [r, g, b] = heightToColor(h);
+  tCol[k] = r; tCol[k + 1] = g; tCol[k + 2] = b;
+}
+terrainGeo.setAttribute('color', new THREE.BufferAttribute(tCol, 3));
+terrainGeo.computeVertexNormals();
+
+const terrainMesh = new THREE.Mesh(terrainGeo, new THREE.MeshLambertMaterial({
+  flatShading: true, vertexColors: true,
+}));
+terrainMesh.receiveShadow = true; terrainMesh.castShadow = true;
+scene.add(terrainMesh);
+
+// ═══════════════════════════════════════════
+// WATER — Surface Heightfield Equalization
+//
+// Each cell stores the absolute Y-height of the water SURFACE.
+// Water "wants" to be flat — it equalizes its surface with neighbors.
+// Terrain blocks flow: water can only reach a neighbor if its
+// surface is above that neighbor's terrain.
+//
+// Algorithm:
+//   1. Source raises water surface at pipe location
+//   2. N equalization passes:
+//      For each cell with water (surface > terrain):
+//        For each lower neighbor whose terrain is below the water surface:
+//          Flow = min(diff, available) * W_FLOW
+//          Move surface height from cell → neighbor
+//   3. Water depth = max(0, surface - terrain)
+//   4. Render water mesh at surface height
+// ═══════════════════════════════════════════
+const waterSurf    = [];   // absolute water surface Y-height
+const waterTmp     = [];   // double-buffer for equalization
+const recentInflow = [];   // water height that arrived in the last 0.1s (locked)
+
+for (let i = 0; i <= GRID_RES; i++) {
+  waterSurf[i]    = new Float32Array(GRID_RES + 1);
+  waterTmp[i]     = new Float32Array(GRID_RES + 1);
+  recentInflow[i] = new Float32Array(GRID_RES + 1);
+}
+
+// Initialize: water surface = terrain (no water anywhere)
+for (let i = 0; i <= GRID_RES; i++)
+  for (let j = 0; j <= GRID_RES; j++)
+    waterSurf[i][j] = heightmap[i][j];
+
+let waterFlowing = false;
+const srcI = Math.round((SOURCE_X + HALF) / CELL);
+const srcJ = Math.round((SOURCE_Z + HALF) / CELL);
+
+function simulateWater(dt) {
+  if (!waterFlowing) { updateWaterMesh(); return; }
+
+  // ── 0. Decay recent inflow (exponential decay over FLOW_DELAY seconds) ──
+  const decay = Math.exp(-dt / FLOW_DELAY); // e^(-dt/0.1): ~63% decays per 0.1s
+  for (let i = 0; i <= GRID_RES; i++)
+    for (let j = 0; j <= GRID_RES; j++)
+      recentInflow[i][j] *= decay;
+
+  // ── 1. Source: raise water surface ──
+  waterSurf[srcI][srcJ] += BASE_SOURCE_RATE * flowMultiplier * dt;
+  // Source water is "new" — add to recent inflow
+  recentInflow[srcI][srcJ] += BASE_SOURCE_RATE * flowMultiplier * dt;
+
+  // ── 2. Equalization passes ──
+  for (let pass = 0; pass < W_PASSES; pass++) {
+    for (let i = 0; i <= GRID_RES; i++) waterTmp[i].set(waterSurf[i]);
+
+    const rev = pass % 2 === 0;
+    for (let ii = 1; ii < GRID_RES; ii++) {
+      for (let jj = 1; jj < GRID_RES; jj++) {
+        const i = rev ? ii : GRID_RES - ii;
+        const j = rev ? jj : GRID_RES - jj;
+
+        const surf = waterTmp[i][j];
+        const terr = heightmap[i][j];
+        const waterHere = surf - terr;
+        if (waterHere < 0.0005) continue;
+
+        // Available = total water - recently arrived (locked for 0.1s)
+        const locked = Math.min(recentInflow[i][j], waterHere);
+        const available = waterHere - locked;
+        if (available < 0.0005) continue; // all water is recent, can't flow yet
+
+        const nbrs = [[i+1,j],[i-1,j],[i,j+1],[i,j-1]];
+        for (const [ni, nj] of nbrs) {
+          if (ni < 0 || ni > GRID_RES || nj < 0 || nj > GRID_RES) continue;
+          const nSurf = waterTmp[ni][nj];
+          const nTerr = heightmap[ni][nj];
+
+          if (surf <= nTerr) continue;
+          if (surf <= nSurf) continue;
+
+          const diff = surf - nSurf;
+          const maxFlow = Math.min(available * 0.5, diff * W_FLOW);
+          if (maxFlow < 0.0001) continue;
+
+          waterSurf[i][j] -= maxFlow;
+          waterSurf[ni][nj] += maxFlow;
+          recentInflow[ni][nj] += maxFlow; // arriving water is "new"
+        }
+      }
+    }
+  }
+
+  // ── 3. Clamp: water surface can't go below terrain ──
+  for (let i = 0; i <= GRID_RES; i++)
+    for (let j = 0; j <= GRID_RES; j++)
+      if (waterSurf[i][j] < heightmap[i][j])
+        waterSurf[i][j] = heightmap[i][j];
+
+  updateWaterMesh();
+}
+
+// ═══ WATER SURFACE MESH ═══
+const waterGeo = new THREE.PlaneGeometry(TERRAIN_SIZE, TERRAIN_SIZE, GRID_RES, GRID_RES);
+waterGeo.rotateX(-Math.PI / 2);
+// RGBA vertex colors (4 components for alpha support)
+const wCol = new Float32Array(waterGeo.attributes.position.array.length / 3 * 4);
+waterGeo.setAttribute('color', new THREE.BufferAttribute(wCol, 4));
+
+const waterMat = new THREE.MeshPhongMaterial({
+  color: '#3388cc', specular: '#ffffff', shininess: 90,
+  transparent: true, opacity: 1.0,
+  flatShading: true, vertexColors: true, depthWrite: true,
+});
+const waterMesh = new THREE.Mesh(waterGeo, waterMat);
+waterMesh.renderOrder = 1;
+waterMesh.receiveShadow = true;
+scene.add(waterMesh);
+
+// Returns [r, g, b, alpha] — shallow = more transparent & less reflective
+function waterColor(d) {
+  // Alpha: shallow → transparent, deep → opaque
+  const alpha = 0.3 + 0.7 * (1 - Math.exp(-d / 0.08));
+  // Brightness boost: deeper water reflects more light
+  const bright = 0.7 + 0.3 * (1 - Math.exp(-d / 0.15));
+
+  if (d < 0.01) return [0.32 * bright, 0.58 * bright, 0.74 * bright, alpha];
+  if (d < 0.15) return [0.35 * bright, 0.62 * bright, 0.80 * bright, alpha];
+  if (d < 0.40) return [0.28 * bright, 0.52 * bright, 0.75 * bright, alpha];
+  if (d < 0.80) return [0.18 * bright, 0.38 * bright, 0.65 * bright, alpha];
+  return [0.10 * bright, 0.25 * bright, 0.50 * bright, alpha];
+}
+
+function updateWaterMesh() {
+  const pos = waterGeo.attributes.position.array;
+  const col = waterGeo.attributes.color.array; // now RGBA: [r,g,b,a, r,g,b,a, ...]
+
+  for (let k = 0, c = 0; k < pos.length; k += 3, c += 4) {
+    const wx = pos[k], wz = pos[k + 2];
+    const terrainH = getHeight(wx, wz);
+
+    const gx = (wx + HALF) / CELL, gz = (wz + HALF) / CELL;
+    const ix = Math.max(0, Math.min(GRID_RES - 1, Math.floor(gx)));
+    const iz = Math.max(0, Math.min(GRID_RES - 1, Math.floor(gz)));
+    const fx = THREE.MathUtils.clamp(gx - ix, 0, 1);
+    const fz = THREE.MathUtils.clamp(gz - iz, 0, 1);
+    const ws = (1 - fx) * (1 - fz) * waterSurf[ix][iz] + fx * (1 - fz) * waterSurf[ix + 1][iz]
+            + (1 - fx) * fz * waterSurf[ix][iz + 1] + fx * fz * waterSurf[ix + 1][iz + 1];
+
+    const depth = ws - terrainH;
+    pos[k + 1] = depth > 0.003 ? ws : terrainH - 0.05;
+
+    const [wr, wg, wb, wa] = waterColor(depth);
+    col[c] = wr; col[c + 1] = wg; col[c + 2] = wb; col[c + 3] = wa;
+  }
+  waterGeo.attributes.position.needsUpdate = true;
+  waterGeo.attributes.color.needsUpdate = true;
+  waterGeo.computeVertexNormals();
+}
+
+// Init water mesh hidden
+(function() {
+  const pos = waterGeo.attributes.position.array;
+  for (let k = 0; k < pos.length; k += 3) pos[k + 1] = getHeight(pos[k], pos[k + 2]) - 0.05;
+  waterGeo.attributes.position.needsUpdate = true;
+  waterGeo.computeVertexNormals();
+})();
+
+// ═══ SOURCE PIPE ═══
+const pipeGroup = new THREE.Group();
+const pipeMat = new THREE.MeshLambertMaterial({ color: '#5a5a5a', flatShading: true });
+const body = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.25, 1.2, 8), pipeMat);
+body.position.y = 1.2; pipeGroup.add(body);
+const flange = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 0.1, 8), pipeMat);
+flange.position.y = 0.55; pipeGroup.add(flange);
+const support = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.15, 1.0, 6), pipeMat);
+support.position.set(0.35, -0.1, 0.35); pipeGroup.add(support);
+const srcH = getHeight(SOURCE_X, SOURCE_Z);
+pipeGroup.position.set(SOURCE_X, srcH - 0.1, SOURCE_Z);
+pipeGroup.rotation.z = 0.3;
+scene.add(pipeGroup);
+
+const poolGeo = new THREE.CircleGeometry(0.35, 8);
+poolGeo.rotateX(-Math.PI / 2);
+const poolMesh = new THREE.Mesh(poolGeo, new THREE.MeshBasicMaterial({
+  color: '#3388bb', transparent: true, opacity: 0.5, depthTest: true, depthWrite: false,
+}));
+poolMesh.position.set(SOURCE_X, srcH + 0.02, SOURCE_Z);
+poolMesh.renderOrder = 0;
+scene.add(poolMesh);
+
+// ═══ ORBIT CONTROLS ═══
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(SOURCE_X + 3, 2, SOURCE_Z + 3);
+controls.mouseButtons = { LEFT: -1, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
+controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
+controls.enableDamping = true; controls.dampingFactor = 0.08;
+controls.minDistance = 4; controls.maxDistance = 35;
+controls.maxPolarAngle = Math.PI * 0.48;
+controls.update();
+
+// ═══ BRUSH ═══
+const brushRing = new THREE.Mesh(
+  new THREE.TorusGeometry(BRUSH_RADIUS, 0.08, 8, 24),
+  new THREE.MeshBasicMaterial({ color: '#ff6b4a', transparent: true,
+    opacity: 0.7, depthTest: true, depthWrite: false }),
+);
+brushRing.rotation.x = -Math.PI / 2;
+brushRing.renderOrder = 3;
+brushRing.visible = false;
+scene.add(brushRing);
+
+// ═══ INTERACTION ═══
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+let mouseDown = false, shiftDown = false;
+let modeLock = 'dig';
+let brushIntersection = null;
+
+function getMode() { return shiftDown ? 'build' : modeLock; }
+
+function updateBrushRing() {
+  if (brushIntersection && !mouseDown) {
+    brushRing.visible = true;
+    brushRing.position.copy(brushIntersection.point);
+    brushRing.position.y += 0.07;
+    brushRing.material.color.set(getMode() === 'dig' ? '#ff6b4a' : '#7ec850');
+  } else { brushRing.visible = false; }
+}
+
+function modifyTerrain(wx, wz, dt) {
+  const sign = getMode() === 'dig' ? -1 : 1, r = BRUSH_RADIUS;
+  const iMin = Math.max(0, Math.floor((wx - r + HALF) / CELL));
+  const iMax = Math.min(GRID_RES, Math.ceil((wx + r + HALF) / CELL));
+  const jMin = Math.max(0, Math.floor((wz - r + HALF) / CELL));
+  const jMax = Math.min(GRID_RES, Math.ceil((wz + r + HALF) / CELL));
+  for (let i = iMin; i <= iMax; i++) {
+    for (let j = jMin; j <= jMax; j++) {
+      const dist = Math.hypot(worldX(i) - wx, worldZ(j) - wz);
+      if (dist >= r) continue;
+      const falloff = (1 - dist / r) ** 2 * (3 - 2 * (1 - dist / r));
+      heightmap[i][j] += sign * BRUSH_STRENGTH * falloff * dt;
+      heightmap[i][j] = THREE.MathUtils.clamp(heightmap[i][j], MIN_HEIGHT, MAX_HEIGHT);
+      // Also move water surface with terrain (keep water depth unchanged)
+      waterSurf[i][j] += sign * BRUSH_STRENGTH * falloff * dt;
+    }
+  }
+  updateTerrainMesh();
+}
+
+function updateTerrainMesh() {
+  const pos = terrainGeo.attributes.position.array;
+  const col = terrainGeo.attributes.color.array;
+  for (let k = 0; k < pos.length; k += 3) {
+    const h = getHeight(pos[k], pos[k + 2]);
+    pos[k + 1] = h;
+    const [r, g, b] = heightToColor(h);
+    col[k] = r; col[k + 1] = g; col[k + 2] = b;
+  }
+  terrainGeo.attributes.position.needsUpdate = true;
+  terrainGeo.attributes.color.needsUpdate = true;
+  terrainGeo.computeVertexNormals();
+}
+
+function getIntersection(e) {
+  mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+  mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+  const hits = raycaster.intersectObjects([terrainMesh, waterMesh]);
+  return hits.length > 0 ? hits[0] : null;
+}
+
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return;
+  const hit = getIntersection(e);
+  if (hit) { mouseDown = true; brushIntersection = hit; brushRing.visible = false; modifyTerrain(hit.point.x, hit.point.z, 0.016); }
+});
+renderer.domElement.addEventListener('pointermove', (e) => {
+  const hit = getIntersection(e);
+  if (mouseDown) { if (hit) brushIntersection = hit; }
+  else { brushIntersection = hit; updateBrushRing(); }
+});
+window.addEventListener('pointerup', () => { mouseDown = false; updateBrushRing(); });
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Shift') { shiftDown = true; updateBrushRing(); }
+  if (e.key === 'b' || e.key === 'B') { modeLock = modeLock === 'dig' ? 'build' : 'dig'; updateBrushRing(); }
+  if (e.key === ' ') { e.preventDefault(); waterFlowing = !waterFlowing; }
+  if (e.key === '+' || e.key === '=') {
+    flowMultiplier += 0.1;
+    updateUI();
+  }
+  if (e.key === '-' || e.key === '_') {
+    flowMultiplier = Math.max(0.1, flowMultiplier - 0.1);
+    updateUI();
+  }
+});
+window.addEventListener('keyup', (e) => { if (e.key === 'Shift') { shiftDown = false; updateBrushRing(); } });
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
+
+// ═══ UI ═══
+function updateUI() {
+  const mode = getMode();
+  const mb = document.getElementById('modeBadge');
+  mb.textContent = mode === 'dig' ? 'Dig' : 'Build';
+  mb.className = 'badge ' + mode;
+  const fb = document.getElementById('flowBadge');
+  fb.textContent = waterFlowing ? 'ON' : 'OFF';
+  fb.className = 'badge ' + (waterFlowing ? 'on' : 'off');
+  let total = 0;
+  for (let i = 0; i <= GRID_RES; i++)
+    for (let j = 0; j <= GRID_RES; j++)
+      total += Math.max(0, waterSurf[i][j] - heightmap[i][j]);
+  document.getElementById('waterVol').textContent = total.toFixed(1);
+  document.getElementById('flowRate').textContent = flowMultiplier.toFixed(1);
+}
+
+// ═══ ANIMATION ═══
+const clock = new THREE.Clock();
+let lastUI = 0;
+
+function animate() {
+  requestAnimationFrame(animate);
+  let dt = Math.min(clock.getDelta(), 0.1);
+  controls.update();
+
+  if (mouseDown && brushIntersection) {
+    modifyTerrain(brushIntersection.point.x, brushIntersection.point.z, dt);
+  }
+
+  simulateWater(dt);
+
+  if (brushRing.visible && brushIntersection) {
+    brushRing.position.y = brushIntersection.point.y + 0.07 + Math.sin(performance.now() * 0.004) * 0.04;
+  }
+  if (waterFlowing) {
+    poolMesh.scale.setScalar(1 + Math.sin(performance.now() * 0.008) * 0.15);
+    poolMesh.material.opacity = 0.4 + Math.sin(performance.now() * 0.006) * 0.2;
+  }
+  if (performance.now() - lastUI > 250) { updateUI(); lastUI = performance.now(); }
+  renderer.render(scene, camera);
+}
+
+animate();
+console.log('💧 Surface heightfield equalization');
+console.log('  Water surface = flat-equalizing heightfield');
+console.log('  Terrain blocks flow where surface < terrain');
+console.log('  Space→toggle  |  Click+drag→dig  |  Shift+drag→build');
+</script>
+</body>
+</html>
