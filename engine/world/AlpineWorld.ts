@@ -1,0 +1,436 @@
+import * as THREE from "three";
+import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { WORLD_CONFIG } from "@/engine/config";
+import { ScenerySystem } from "@/engine/scenery/ScenerySystem";
+import { TerrainSystem } from "@/engine/terrain/TerrainSystem";
+import type { MapSaveData, TerrainTool, WorldEventHandlers } from "@/engine/types";
+import { ModelManager } from "@/engine/models/ModelManager";
+import { MODELS_CONFIG } from "@/engine/models/presets";
+import { WaterSimulation } from "@/engine/water/WaterSimulation";
+
+export class AlpineWorld {
+  readonly terrain: TerrainSystem;
+  readonly water: WaterSimulation;
+  readonly scenery: ScenerySystem;
+  readonly models: ModelManager;
+
+  private readonly renderer: THREE.WebGLRenderer;
+  private readonly scene = new THREE.Scene();
+  private readonly camera: THREE.PerspectiveCamera;
+  private readonly controls: OrbitControls;
+  private readonly resizeObserver: ResizeObserver;
+  private readonly raycaster = new THREE.Raycaster();
+  private readonly pointer = new THREE.Vector2();
+  private readonly brushCursor: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>;
+  private frame = 0;
+  private disposed = false;
+  private tool: TerrainTool = "orbit";
+  private brushRadius: number = WORLD_CONFIG.brush.radius;
+  private brushStrength: number = WORLD_CONFIG.brush.strength;
+  private waterActive = false;
+  private flowRate = 1;
+  private editing = false;
+  private editedInStroke = false;
+  private lastEditTime = 0;
+  private lastFrameTime = performance.now();
+  private statsTime = 0;
+  private fps = 60;
+  private currentSeed: string;
+  private hoverElevation = 0;
+  private cursorPoint: THREE.Vector3 | null = null;
+
+  constructor(
+    private readonly container: HTMLElement,
+    seed: string,
+    private readonly handlers: WorldEventHandlers = {},
+  ) {
+    this.currentSeed = seed;
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75));
+    this.renderer.setSize(container.clientWidth, container.clientHeight);
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.12;
+    this.renderer.domElement.setAttribute("aria-label", "可交互的低多边形山脉场景");
+    this.container.appendChild(this.renderer.domElement);
+
+    this.camera = new THREE.PerspectiveCamera(
+      WORLD_CONFIG.camera.fov,
+      container.clientWidth / Math.max(1, container.clientHeight),
+      WORLD_CONFIG.camera.near,
+      WORLD_CONFIG.camera.far,
+    );
+    this.camera.position.fromArray(WORLD_CONFIG.camera.position);
+
+    this.scene.fog = new THREE.FogExp2("#cbd9d4", 0.0125);
+    this.createAtmosphere();
+    this.createLighting();
+    this.terrain = new TerrainSystem(this.scene, seed);
+    this.scenery = new ScenerySystem(this.scene, this.terrain, seed);
+    this.water = new WaterSimulation(this.scene, this.terrain);
+    this.models = new ModelManager(this.scene, this.terrain, MODELS_CONFIG);
+    this.models.attachScenery(this.scenery);
+    this.models.initialize().catch((err) => console.warn("Model loading failed:", err));
+    this.brushCursor = this.createBrushCursor();
+
+    this.controls = new OrbitControls(this.camera, this.renderer.domElement);
+    this.controls.target.fromArray(WORLD_CONFIG.camera.target);
+    this.controls.enableDamping = true;
+    this.controls.dampingFactor = 0.055;
+    this.controls.minDistance = 16;
+    this.controls.maxDistance = 144;
+    this.controls.minPolarAngle = 0.18;
+    this.controls.maxPolarAngle = Math.PI * 0.475;
+    this.controls.enablePan = true;
+    this.controls.update();
+    this.syncControlMode();
+
+    this.renderer.domElement.addEventListener("pointerdown", this.onPointerDown);
+    this.renderer.domElement.addEventListener("pointermove", this.onPointerMove);
+    this.renderer.domElement.addEventListener("pointerleave", this.onPointerLeave);
+    this.renderer.domElement.addEventListener("contextmenu", this.onContextMenu);
+    window.addEventListener("pointerup", this.onPointerUp);
+
+    this.resizeObserver = new ResizeObserver(() => this.resize());
+    this.resizeObserver.observe(this.container);
+    this.animate();
+    requestAnimationFrame(() => this.handlers.onReady?.());
+  }
+
+  setTool(tool: TerrainTool): void {
+    this.tool = tool;
+    this.brushCursor.visible = false;
+    this.syncControlMode();
+  }
+
+  setBrushRadius(radius: number): void {
+    this.brushRadius = THREE.MathUtils.clamp(radius, WORLD_CONFIG.brush.minRadius, WORLD_CONFIG.brush.maxRadius);
+    this.brushCursor.scale.setScalar(this.brushRadius);
+  }
+
+  setBrushStrength(strength: number): void {
+    this.brushStrength = THREE.MathUtils.clamp(strength, 1, 10);
+  }
+
+  setWaterActive(active: boolean): void {
+    this.waterActive = active;
+  }
+
+  setFlowRate(rate: number): void {
+    this.flowRate = THREE.MathUtils.clamp(rate, 0.2, 2.4);
+  }
+
+  regenerate(seed: string): void {
+    this.currentSeed = seed;
+    this.terrain.regenerate(seed);
+    this.scenery.regenerate(seed);
+    this.water.syncTerrain(false);
+    this.water.setSource(this.terrain.sourceIndex);
+    // Re-dock models to new terrain surface
+    this.models.refreshHeights();
+    // Re-apply scenery replacement if configured (placements changed with new seed)
+    if (MODELS_CONFIG.replaceTrees?.enabled || MODELS_CONFIG.replaceRocks?.enabled) {
+      this.models.clearSceneryReplacement();
+      const treePath = MODELS_CONFIG.replaceTrees?.enabled
+        ? MODELS_CONFIG.replaceTrees.modelPath
+        : undefined;
+      const rockPath = MODELS_CONFIG.replaceRocks?.enabled
+        ? MODELS_CONFIG.replaceRocks.modelPath
+        : undefined;
+      this.models.replaceScenery(treePath, rockPath).catch((err) =>
+        console.warn("Scenery replacement failed on regenerate:", err),
+      );
+    }
+    this.hoverElevation = 0;
+    this.focusHome();
+  }
+
+  resetTerrain(): void {
+    this.terrain.reset();
+    this.scenery.refreshHeights();
+    this.models.refreshHeights();
+    this.water.syncTerrain(true);
+  }
+
+  clearWater(): void {
+    this.water.clear();
+  }
+
+  get seed(): string {
+    return this.currentSeed;
+  }
+
+  /** 导出当前地形与水体的完整快照 */
+  getSaveState(): MapSaveData {
+    return {
+      heights: Array.from(this.terrain.heights),
+      waterDepths: Array.from(this.water["depth"] as Float32Array),
+      sourceIndex: this.terrain.sourceIndex,
+      peakIndex: this.terrain.peakIndex,
+      minHeight: this.terrain.minHeight,
+      maxHeight: this.terrain.maxHeight,
+      seed: this.currentSeed,
+      modelInstances: this.models.getInstanceData(),
+    };
+  }
+
+  /** 从快照恢复地形与水体的完整状态 */
+  loadSaveState(data: MapSaveData): void {
+    this.currentSeed = data.seed;
+    this.terrain.heights = new Float32Array(data.heights);
+    this.terrain.sourceIndex = data.sourceIndex;
+    this.terrain.peakIndex = data.peakIndex;
+    this.terrain.minHeight = data.minHeight;
+    this.terrain.maxHeight = data.maxHeight;
+    // 地形需要通过 regenerate 来重建几何体，但 regenerate 会覆盖 heights。
+    // 所以这里直接用 TerrainSystem 的 rebuildGeometry 对应的方案：直接替换 + 重建
+    this.terrain["rebuildGeometry"]();
+    this.scenery.refreshHeights();
+    // 恢复外部模型（terrain 重建后高度已就绪）
+    if (data.modelInstances && data.modelInstances.length > 0) {
+      this.models.loadInstanceData(data.modelInstances).catch((err) =>
+        console.warn("Model restore failed:", err),
+      );
+    }
+    // 恢复水体
+    const waterDepth = this.water["depth"] as Float32Array;
+    waterDepth.set(data.waterDepths);
+    this.water["recentInflow"].fill(0);
+    this.water.setSource(this.terrain.sourceIndex);
+    this.water["updateGeometry"]();
+  }
+
+  focusHome(): void {
+    this.camera.position.fromArray(WORLD_CONFIG.camera.position);
+    this.controls.target.fromArray(WORLD_CONFIG.camera.target);
+    this.controls.update();
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    cancelAnimationFrame(this.frame);
+    this.resizeObserver.disconnect();
+    this.controls.dispose();
+    this.renderer.domElement.removeEventListener("pointerdown", this.onPointerDown);
+    this.renderer.domElement.removeEventListener("pointermove", this.onPointerMove);
+    this.renderer.domElement.removeEventListener("pointerleave", this.onPointerLeave);
+    this.renderer.domElement.removeEventListener("contextmenu", this.onContextMenu);
+    window.removeEventListener("pointerup", this.onPointerUp);
+    this.terrain.dispose();
+    this.scenery.dispose();
+    this.models.dispose();
+    this.water.dispose();
+    this.brushCursor.geometry.dispose();
+    this.brushCursor.material.dispose();
+    this.renderer.dispose();
+    this.renderer.domElement.remove();
+  }
+
+  private createLighting(): void {
+    this.scene.add(new THREE.HemisphereLight("#e7f0ee", "#55605b", 2.15));
+    const sun = new THREE.DirectionalLight("#fff3d6", 4.25);
+    sun.position.set(-22, 36, 18);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.camera.left = -30;
+    sun.shadow.camera.right = 30;
+    sun.shadow.camera.top = 32;
+    sun.shadow.camera.bottom = -26;
+    sun.shadow.camera.near = 1;
+    sun.shadow.camera.far = 90;
+    sun.shadow.bias = -0.0004;
+    this.scene.add(sun);
+
+    const rim = new THREE.DirectionalLight("#b8d6dd", 1.3);
+    rim.position.set(24, 10, -22);
+    this.scene.add(rim);
+  }
+
+  private createAtmosphere(): void {
+    const sky = new THREE.Mesh(
+      new THREE.SphereGeometry(192, 20, 12),
+      new THREE.ShaderMaterial({
+        side: THREE.BackSide,
+        depthWrite: false,
+        uniforms: {
+          topColor: { value: new THREE.Color("#8faea9") },
+          horizonColor: { value: new THREE.Color("#dce4dc") },
+          bottomColor: { value: new THREE.Color("#eef0e8") },
+        },
+        vertexShader: `
+          varying float vHeight;
+          void main() {
+            vHeight = normalize(position).y;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform vec3 topColor;
+          uniform vec3 horizonColor;
+          uniform vec3 bottomColor;
+          varying float vHeight;
+          void main() {
+            float upper = smoothstep(-0.02, 0.72, vHeight);
+            float lower = smoothstep(-0.36, 0.02, vHeight);
+            vec3 color = mix(bottomColor, horizonColor, lower);
+            color = mix(color, topColor, upper);
+            gl_FragColor = vec4(color, 1.0);
+          }
+        `,
+      }),
+    );
+    this.scene.add(sky);
+
+    const base = new THREE.Mesh(
+      new THREE.CircleGeometry(164, 48),
+      new THREE.MeshStandardMaterial({ color: "#74877d", roughness: 1, flatShading: true }),
+    );
+    base.rotation.x = -Math.PI / 2;
+    base.position.y = WORLD_CONFIG.minHeight - 0.08;
+    base.receiveShadow = true;
+    this.scene.add(base);
+  }
+
+  private createBrushCursor(): THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial> {
+    const cursor = new THREE.Mesh(
+      new THREE.RingGeometry(0.86, 1, 40),
+      new THREE.MeshBasicMaterial({
+        color: "#d66c4d",
+        transparent: true,
+        opacity: 0.82,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      }),
+    );
+    cursor.rotation.x = -Math.PI / 2;
+    cursor.scale.setScalar(this.brushRadius);
+    cursor.renderOrder = 5;
+    cursor.visible = false;
+    this.scene.add(cursor);
+    return cursor;
+  }
+
+  private syncControlMode(): void {
+    this.controls.mouseButtons.LEFT = this.tool === "orbit" ? THREE.MOUSE.ROTATE : (-1 as THREE.MOUSE);
+    this.controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
+    this.controls.mouseButtons.RIGHT = -1 as THREE.MOUSE;
+    this.controls.touches.ONE = this.tool === "orbit" ? THREE.TOUCH.ROTATE : (-1 as THREE.TOUCH);
+    const colors: Record<TerrainTool, string> = {
+      orbit: "#dbe8df",
+      carve: "#d66c4d",
+      raise: "#6d9a70",
+      smooth: "#78aab0",
+    };
+    this.brushCursor.material.color.set(colors[this.tool]);
+    this.renderer.domElement.dataset.tool = this.tool;
+  }
+
+  private updatePointer(event: PointerEvent): THREE.Intersection | null {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    const intersection = this.raycaster.intersectObject(this.terrain.mesh, false)[0] ?? null;
+    if (intersection) {
+      this.cursorPoint = intersection.point.clone();
+      this.hoverElevation = intersection.point.y;
+      if (this.tool !== "orbit") {
+        this.brushCursor.position.copy(intersection.point);
+        this.brushCursor.position.y += 0.09;
+        this.brushCursor.visible = true;
+      }
+    }
+    return intersection;
+  }
+
+  private applyCurrentBrush(now: number): void {
+    if (!this.cursorPoint || now - this.lastEditTime < 28) return;
+    const deltaTime = Math.min(0.05, Math.max(0.012, (now - this.lastEditTime) / 1000));
+    this.lastEditTime = now;
+    const changed = this.terrain.applyBrush(
+      this.cursorPoint.x,
+      this.cursorPoint.z,
+      this.tool,
+      this.brushRadius,
+      this.brushStrength,
+      deltaTime,
+    );
+    if (changed) {
+      this.editedInStroke = true;
+      this.water.syncTerrain(true);
+    }
+  }
+
+  private onPointerDown = (event: PointerEvent): void => {
+    // 阻止浏览器右键手势（如 Edge 的右键+拖拽=返回）
+    if (event.button === 2) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (event.button !== 0 || this.tool === "orbit") return;
+    const hit = this.updatePointer(event);
+    if (!hit) return;
+    event.preventDefault();
+    this.editing = true;
+    this.editedInStroke = false;
+    this.lastEditTime = performance.now() - 32;
+    this.renderer.domElement.setPointerCapture?.(event.pointerId);
+    this.applyCurrentBrush(performance.now());
+  };
+
+  private onPointerMove = (event: PointerEvent): void => {
+    this.updatePointer(event);
+    if (this.editing) this.applyCurrentBrush(performance.now());
+  };
+
+  private onPointerUp = (): void => {
+    if (!this.editing) return;
+    this.editing = false;
+    if (this.editedInStroke) {
+      this.scenery.refreshHeights();
+      this.models.refreshHeights();
+      this.handlers.onTerrainEdit?.();
+    }
+  };
+
+  private onPointerLeave = (): void => {
+    if (!this.editing) this.brushCursor.visible = false;
+  };
+
+  private onContextMenu = (event: MouseEvent): void => event.preventDefault();
+
+  private resize(): void {
+    const width = this.container.clientWidth;
+    const height = Math.max(1, this.container.clientHeight);
+    this.camera.aspect = width / height;
+    this.camera.updateProjectionMatrix();
+    this.renderer.setSize(width, height, false);
+  }
+
+  private animate = (time = performance.now()): void => {
+    if (this.disposed) return;
+    this.frame = requestAnimationFrame(this.animate);
+    const deltaTime = Math.min(0.05, Math.max(0.001, (time - this.lastFrameTime) / 1000));
+    this.lastFrameTime = time;
+    const instantFps = 1 / deltaTime;
+    this.fps = THREE.MathUtils.lerp(this.fps, instantFps, 0.06);
+    this.controls.update();
+    if (this.waterActive) this.water.step(deltaTime, this.flowRate);
+    this.water.updateMarker(time, this.waterActive);
+    if (this.brushCursor.visible) this.brushCursor.position.y += Math.sin(time * 0.005) * 0.0008;
+
+    if (time - this.statsTime > 250) {
+      this.statsTime = time;
+      this.handlers.onStats?.({
+        elevation: this.hoverElevation,
+        peak: this.terrain.maxHeight,
+        waterVolume: this.water.volume,
+        fps: Math.min(99, Math.round(this.fps)),
+      });
+    }
+    this.renderer.render(this.scene, this.camera);
+  };
+}

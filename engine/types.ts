@@ -1,0 +1,92 @@
+export type TerrainTool = "orbit" | "carve" | "raise" | "smooth";
+
+export type MountainData = {
+  heights: Float32Array;
+  peakIndex: number;
+  sourceIndex: number;
+  minHeight: number;
+  maxHeight: number;
+};
+
+export type WorldStats = {
+  elevation: number;
+  peak: number;
+  waterVolume: number;
+  fps: number;
+};
+
+export type WorldEventHandlers = {
+  onReady?: () => void;
+  onStats?: (stats: WorldStats) => void;
+  onTerrainEdit?: () => void;
+};
+
+export type MapSaveData = {
+  heights: number[];
+  waterDepths: number[];
+  sourceIndex: number;
+  peakIndex: number;
+  minHeight: number;
+  maxHeight: number;
+  seed: string;
+  /** Placed custom model instances (Y derived from terrain on load). */
+  modelInstances: StoredModelInstance[];
+};
+
+export type SavedMapMeta = {
+  id: string;
+  name: string;
+  createdAt: number;
+  seed: string;
+  peakHeight: number;
+};
+
+/* ---- External model import types ---- */
+
+/** A single instance placement defined in the model config. */
+export type ModelInstanceConfig = {
+  x: number;
+  z: number;
+  /** Y-axis rotation in radians. Default 0. */
+  rotation?: number;
+  /** Uniform scale. Default 1. */
+  scale?: number;
+};
+
+/** A named group of model instances sharing the same GLTF source. */
+export type ModelPreset = {
+  /** Human-readable label, e.g. "Mountain Cabin". */
+  name: string;
+  /** Path to GLTF/GLB file, served from public/, e.g. "/models/cabin.glb". */
+  modelPath: string;
+  /** Positions for each instance of this model. */
+  instances: ModelInstanceConfig[];
+  /** Extra Y offset added above terrain surface after height docking. Default 0. */
+  heightOffset?: number;
+  /** When true (default), dock model bottom to terrain.heightAt(x,z). */
+  dockToTerrain?: boolean;
+  /** Whether the model casts shadows. Default true. */
+  castShadow?: boolean;
+  /** Whether the model receives shadows. Default true. */
+  receiveShadow?: boolean;
+};
+
+/** Top-level models configuration. */
+export type ModelsConfig = {
+  presets: ModelPreset[];
+  /** If enabled, procedural trees are replaced by a GLTF at the same seed-derived positions. */
+  replaceTrees?: { enabled: boolean; modelPath: string };
+  /** If enabled, procedural rocks are replaced by a GLTF at the same seed-derived positions. */
+  replaceRocks?: { enabled: boolean; modelPath: string };
+};
+
+/** Stored representation of a single model instance in save data.
+ *  Y-coordinate is NOT stored — always derived from terrain.heightAt(x,z) on restore. */
+export type StoredModelInstance = {
+  modelPath: string;
+  x: number;
+  z: number;
+  rotation: number;
+  scale: number;
+};
+
