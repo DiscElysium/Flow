@@ -295,12 +295,22 @@ export class TerrainSystem {
     const normal = edgeA.cross(edgeB).normalize();
     const slope = 1 - Math.max(0, normal.y);
     const height = (a[1] + b[1] + c[1]) / 3;
+    const normalizedX = ((x + 0.5) / WORLD_CONFIG.segments) * 2 - 1;
     const normalizedHeight = THREE.MathUtils.clamp((height - this.minHeight) / Math.max(1, this.maxHeight - this.minHeight), 0, 1);
     const variation = 0.91 + hash2D(x * 2 + triangleIndex, z, this.seedHash) * 0.16;
     let base: string = TERRAIN_PALETTE.meadow;
     let wateredBase: string = WATERED_TERRAIN_PALETTE.meadow;
 
-    if (height < 0.6) {
+    if (normalizedX > 0.5 && height < WORLD_CONFIG.seaLevel - 0.2) {
+      base = TERRAIN_PALETTE.seabed;
+      wateredBase = base;
+    } else if (normalizedX > 0.48 && height < 0.18) {
+      base = TERRAIN_PALETTE.wetSand;
+      wateredBase = base;
+    } else if (normalizedX > 0.45 && height < 0.95) {
+      base = TERRAIN_PALETTE.sand;
+      wateredBase = base;
+    } else if (height < 0.6) {
       base = TERRAIN_PALETTE.valley;
       wateredBase = WATERED_TERRAIN_PALETTE.valley;
     } else if (normalizedHeight < 0.31) {

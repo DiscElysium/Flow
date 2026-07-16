@@ -97,11 +97,13 @@ export function AlpineFlowLab() {
   const [showSaves, setShowSaves] = useState(false);
   const [mode, setMode] = useState<"edit" | "play">("edit");
   const [tool, setTool] = useState<TerrainTool>("orbit");
-  const [brushRadius, setBrushRadius] = useState(2.1);
+  const [brushRadius, setBrushRadius] = useState(3.2);
   const [brushStrength, setBrushStrength] = useState(5.4);
   const [waterActive, setWaterActive] = useState(false);
   const [flowRate, setFlowRate] = useState(1);
   const [irrigationRadius, setIrrigationRadius] = useState(3);
+  const [flowDelay, setFlowDelay] = useState(0.1);
+  const [showcaseActive, setShowcaseActive] = useState(false);
   const [stats, setStats] = useState<WorldStats>(initialStats);
   const [saves, setSaves] = useState<SavedMapMeta[]>(parseSavesMeta);
   const [saveName, setSaveName] = useState("");
@@ -158,6 +160,8 @@ export function AlpineFlowLab() {
   useEffect(() => {
     if (ready) worldRef.current?.setEditMode(editMode);
   }, [editMode, ready]);
+  useEffect(() => worldRef.current?.setFlowDelay(flowDelay), [flowDelay]);
+  useEffect(() => worldRef.current?.setShowcaseActive(showcaseActive), [showcaseActive]);
 
   // Prevent browser context menu & right-click gestures across the entire page
   useEffect(() => {
@@ -265,6 +269,13 @@ export function AlpineFlowLab() {
 
   const resetTerrain = useCallback(() => worldRef.current?.resetTerrain(), []);
   const clearWater = useCallback(() => worldRef.current?.clearWater(), []);
+  const toggleShowcase = useCallback(() => {
+    setShowcaseActive((active) => {
+      const next = !active;
+      if (next) setTool("orbit");
+      return next;
+    });
+  }, []);
 
   return (
     <main className="lab-shell" id="top">
@@ -281,15 +292,25 @@ export function AlpineFlowLab() {
           </span>
         </a>
         <div className="topbar-actions">
+          {!showcaseActive && (
+            <button
+              className={`mode-toggle ${editMode ? "is-edit" : "is-play"}`}
+              onClick={toggleMode}
+              aria-label={`切换到${editMode ? "游玩" : "编辑"}模式`}
+              title="按 M 切换模式"
+            >
+              <i />{editMode ? "编辑模式" : "游玩模式"}<small>M</small>
+            </button>
+          )}
+          <span className="seed-chip"><i />{showcaseActive ? "WATER TEST RANGE" : <>SEED&nbsp; {seed}</>}</span>
           <button
-            className={`mode-toggle ${editMode ? "is-edit" : "is-play"}`}
-            onClick={toggleMode}
-            aria-label={`切换到${editMode ? "游玩" : "编辑"}模式`}
-            title="按 M 切换模式"
+            className={`scene-mode-button ${showcaseActive ? "is-active" : ""}`}
+            onClick={toggleShowcase}
+            aria-pressed={showcaseActive}
           >
-            <i />{editMode ? "编辑模式" : "游玩模式"}<small>M</small>
+            <Waves size={15} />
+            <span>{showcaseActive ? "返回模拟场景" : "水体测试场"}</span>
           </button>
-          <span className="seed-chip"><i />SEED&nbsp; {seed}</span>
           <button className="icon-button" onClick={() => worldRef.current?.focusHome()} aria-label="返回最佳视角" title="返回最佳视角">
             <Focus size={17} />
           </button>
@@ -299,13 +320,13 @@ export function AlpineFlowLab() {
         </div>
       </header>
 
-      {editMode && (
+      {editMode && !showcaseActive && (
         <button className="regenerate-fab" onClick={regenerate} disabled={renderError} aria-label="重新生成山脉" title="重新生成">
           <RefreshCw size={18} />
         </button>
       )}
 
-      <aside className="terrain-readout glass-panel" aria-label="地形与水流数据">
+      {!showcaseActive && <aside className="terrain-readout glass-panel" aria-label="地形与水流数据">
         <div className="readout-heading">
           <span><Sparkles size={15} /> LIVE PROFILE</span>
           <b>{stats.fps} FPS</b>
@@ -344,6 +365,19 @@ export function AlpineFlowLab() {
               <input type="range" min="0.5" max="8" step="0.1" value={irrigationRadius} onChange={(event) => setIrrigationRadius(Number(event.target.value))} disabled={renderError} />
             </label>
           )}
+          <label>
+            <span>流速 <b>{flowDelay.toFixed(2)} 秒/格</b></span>
+            <input
+              type="range"
+              min="0.02"
+              max="0.5"
+              step="0.01"
+              value={flowDelay}
+              onChange={(event) => setFlowDelay(Number(event.target.value))}
+              disabled={renderError}
+              aria-label="水流每格停留时间"
+            />
+          </label>
           <div className={`panel-actions ${editMode ? "" : "single"}`}>
             <button onClick={clearWater} disabled={renderError}><Eraser size={13} /> 清空水体</button>
             {editMode && <button onClick={resetTerrain} disabled={renderError}><Undo2 size={13} /> 还原地形</button>}
@@ -379,9 +413,9 @@ export function AlpineFlowLab() {
           )}
         </section>
         <p className="scale-note">* 艺术化模拟单位，用于比较相对变化</p>
-      </aside>
+      </aside>}
 
-      {editMode && <nav className="tool-dock glass-panel" aria-label="地形工具">
+      {editMode && !showcaseActive && <nav className="tool-dock glass-panel" aria-label="地形工具">
         <div className="tool-group">
           {toolOptions.map((option) => {
             const Icon = option.icon;
@@ -404,7 +438,7 @@ export function AlpineFlowLab() {
         <div className="brush-sliders">
           <label>
             <span>范围 <b>{brushRadius.toFixed(1)}</b></span>
-            <input type="range" min="0.8" max="4.8" step="0.1" value={brushRadius} onChange={(event) => setBrushRadius(Number(event.target.value))} disabled={renderError} />
+            <input type="range" min="1.2" max="8" step="0.1" value={brushRadius} onChange={(event) => setBrushRadius(Number(event.target.value))} disabled={renderError} />
           </label>
           <label>
             <span>力度 <b>{brushStrength.toFixed(1)}</b></span>
@@ -416,9 +450,17 @@ export function AlpineFlowLab() {
         </button>
       </nav>}
 
-      <div className="scene-index" aria-hidden="true">
+      {!showcaseActive && <div className="scene-index" aria-hidden="true">
         <span>46° 48′ N</span><i /><span>{editMode ? "EDIT MODE" : "PLAY MODE"}</span><i /><span>{waterActive ? "MELT ACTIVE" : "MELT PAUSED"}</span>
-      </div>
+      </div>}
+
+      {showcaseActive && (
+        <section className="showcase-guide glass-panel" aria-label="水体测试场图例">
+          <div><b>01 河流</b><span>细曲线浪脊沿流向伸展</span></div>
+          <div><b>02 湖泊</b><span>有体积的方向波与局部小浪</span></div>
+          <div><b>03 瀑布</b><span>窄水纹、水幕与落点白沫</span></div>
+        </section>
+      )}
 
       {!ready && (
         <div className="loading-screen">
@@ -439,7 +481,7 @@ export function AlpineFlowLab() {
             <p className="eyebrow"><span>SYS</span> SYSTEM & CONTROLS</p>
             <h2 id="notes-title">一套可以继续生长的山脉系统</h2>
             <ol>
-              <li><b>山脊骨架</b><span>弯曲主脊线确定山峰走向，五层 ridged noise 雕刻峰面。</span></li>
+              <li><b>分区地貌</b><span>左侧高山、低丘平原、噪声海岸与海床都由种子生成，五层 ridged noise 雕刻峰面。</span></li>
               <li><b>地形工具</b><span>选择下切、抬升或平滑，直接在山体上拖动；中键始终旋转镜头。</span></li>
               <li><b>动态融水</b><span>青色晶体是冰川水源。水面依据相邻高度守恒交换，并响应地形改动。</span></li>
               <li><b>模式切换</b><span>按 M 在编辑与游玩模式之间切换；游玩模式会隐藏全部地形编辑功能。</span></li>
