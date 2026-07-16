@@ -119,6 +119,25 @@ button { color: inherit; }
 
 .topbar-actions { display: flex; align-items: center; gap: 8px; }
 
+.scene-mode-button {
+  height: 34px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255,255,255,.22);
+  color: #354b44;
+  font-size: 9px;
+  letter-spacing: .04em;
+  cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
+}
+
+.scene-mode-button:hover { transform: translateY(-1px); background: rgba(255,255,255,.52); }
+.scene-mode-button.is-active { background: #315c62; border-color: #315c62; color: #edf5ef; }
+
 .seed-chip {
   height: 34px;
   padding: 0 12px;
@@ -155,6 +174,33 @@ button { color: inherit; }
 }
 
 .icon-button:hover { transform: translateY(-1px); background: rgba(255,255,255,.55); }
+
+.showcase-guide {
+  position: absolute;
+  z-index: 5;
+  left: 50%;
+  bottom: 22px;
+  width: min(720px, calc(100vw - 44px));
+  min-height: 62px;
+  padding: 10px 14px;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  border-radius: 8px;
+  transform: translateX(-50%);
+}
+
+.showcase-guide div {
+  min-width: 0;
+  padding: 4px 12px;
+  border-left: 1px solid var(--line);
+}
+
+.showcase-guide div:first-child { border-left: 0; }
+.showcase-guide b,
+.showcase-guide span { display: block; }
+.showcase-guide b { color: #24464a; font-family: var(--font-geist-mono), monospace; font-size: 10px; letter-spacing: .08em; }
+.showcase-guide span { margin-top: 4px; color: #65716c; font-size: 9px; }
 
 .scene-intro {
   position: absolute;
@@ -613,6 +659,8 @@ input:disabled { cursor: not-allowed !important; opacity: .42; }
   .lab-shell { min-height: 540px; }
   .topbar { top: 10px; left: 10px; right: 10px; height: 56px; padding-left: 12px; }
   .brand small, .seed-chip { display: none; }
+  .scene-mode-button { width: 34px; padding: 0; justify-content: center; }
+  .scene-mode-button span { display: none; }
   .scene-intro { top: 15%; left: 22px; width: calc(100% - 44px); }
   .scene-intro h1 { font-size: clamp(38px, 12vw, 58px); }
   .intro-copy { width: 80%; font-size: 12px; }
@@ -629,6 +677,10 @@ input:disabled { cursor: not-allowed !important; opacity: .42; }
   .notes-panel { padding: 28px 22px 22px; }
   .notes-panel h2 { font-size: 28px; }
   .notes-panel li { grid-template-columns: 82px 1fr; }
+  .showcase-guide { bottom: 10px; width: calc(100vw - 20px); padding: 7px; }
+  .showcase-guide div { padding: 3px 7px; }
+  .showcase-guide b { font-size: 8px; }
+  .showcase-guide span { display: none; }
 }
 
 @media (max-width: 420px) {

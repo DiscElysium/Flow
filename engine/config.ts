@@ -17,7 +17,8 @@ export const WORLD_CONFIG = {
   },
   camera: {
     fov: 43,
-    near: 0.1,
+    // 提高近裁面以增加深度缓冲精度，减少水面与地表之间的闪线。
+    near: 0.5,
     far: 360,
     position: [30, 23, 31] as [number, number, number],
     target: [0, 6.4, 0] as [number, number, number],

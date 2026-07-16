@@ -7,6 +7,7 @@ import type { MapSaveData, TerrainTool, WorldEventHandlers } from "@/engine/type
 import { ModelManager } from "@/engine/models/ModelManager";
 import { MODELS_CONFIG } from "@/engine/models/presets";
 import { WaterSimulation } from "@/engine/water/WaterSimulation";
+import { WaterShowcaseScene } from "@/engine/water/WaterShowcaseScene";
 
 export class AlpineWorld {
   readonly terrain: TerrainSystem;
@@ -18,6 +19,7 @@ export class AlpineWorld {
   private readonly scene = new THREE.Scene();
   private readonly camera: THREE.PerspectiveCamera;
   private readonly controls: OrbitControls;
+  private readonly waterShowcase: WaterShowcaseScene;
   private readonly resizeObserver: ResizeObserver;
   private readonly raycaster = new THREE.Raycaster();
   private readonly pointer = new THREE.Vector2();
@@ -29,6 +31,7 @@ export class AlpineWorld {
   private brushStrength: number = WORLD_CONFIG.brush.strength;
   private waterActive = false;
   private flowRate = 1;
+  private flowDelay = 0.1;
   private editing = false;
   private editedInStroke = false;
   private lastEditTime = 0;
@@ -38,6 +41,9 @@ export class AlpineWorld {
   private currentSeed: string;
   private hoverElevation = 0;
   private cursorPoint: THREE.Vector3 | null = null;
+  private showcaseActive = false;
+  private readonly savedWorldCameraPosition = new THREE.Vector3();
+  private readonly savedWorldCameraTarget = new THREE.Vector3();
 
   constructor(
     private readonly container: HTMLElement,
@@ -67,6 +73,7 @@ export class AlpineWorld {
     this.scene.fog = new THREE.FogExp2("#cbd9d4", 0.0125);
     this.createAtmosphere();
     this.createLighting();
+    this.waterShowcase = new WaterShowcaseScene();
     this.terrain = new TerrainSystem(this.scene, seed);
     this.scenery = new ScenerySystem(this.scene, this.terrain, seed);
     this.water = new WaterSimulation(this.scene, this.terrain);
@@ -122,6 +129,28 @@ export class AlpineWorld {
     this.flowRate = THREE.MathUtils.clamp(rate, 0.2, 2.4);
   }
 
+  setFlowDelay(seconds: number): void {
+    this.flowDelay = THREE.MathUtils.clamp(seconds, 0.02, 0.5);
+  }
+
+  setShowcaseActive(active: boolean): void {
+    if (this.showcaseActive === active) return;
+    this.showcaseActive = active;
+    this.brushCursor.visible = false;
+    this.editing = false;
+    if (active) {
+      this.savedWorldCameraPosition.copy(this.camera.position);
+      this.savedWorldCameraTarget.copy(this.controls.target);
+      this.camera.position.set(0, 30, 52);
+      this.controls.target.set(0, 2.2, 0);
+    } else {
+      this.camera.position.copy(this.savedWorldCameraPosition);
+      this.controls.target.copy(this.savedWorldCameraTarget);
+    }
+    this.syncControlMode();
+    this.controls.update();
+  }
+
   regenerate(seed: string): void {
     this.currentSeed = seed;
     this.terrain.regenerate(seed);
@@ -166,7 +195,7 @@ export class AlpineWorld {
   getSaveState(): MapSaveData {
     return {
       heights: Array.from(this.terrain.heights),
-      waterDepths: Array.from(this.water["depth"] as Float32Array),
+      waterDepths: this.water.getDepthSnapshot(),
       sourceIndex: this.terrain.sourceIndex,
       peakIndex: this.terrain.peakIndex,
       minHeight: this.terrain.minHeight,
@@ -195,16 +224,17 @@ export class AlpineWorld {
       );
     }
     // 恢复水体
-    const waterDepth = this.water["depth"] as Float32Array;
-    waterDepth.set(data.waterDepths);
-    this.water["recentInflow"].fill(0);
-    this.water.setSource(this.terrain.sourceIndex);
-    this.water["updateGeometry"]();
+    this.water.restoreDepthSnapshot(data.waterDepths);
   }
 
   focusHome(): void {
-    this.camera.position.fromArray(WORLD_CONFIG.camera.position);
-    this.controls.target.fromArray(WORLD_CONFIG.camera.target);
+    if (this.showcaseActive) {
+      this.camera.position.set(0, 30, 52);
+      this.controls.target.set(0, 2.2, 0);
+    } else {
+      this.camera.position.fromArray(WORLD_CONFIG.camera.position);
+      this.controls.target.fromArray(WORLD_CONFIG.camera.target);
+    }
     this.controls.update();
   }
 
@@ -222,6 +252,7 @@ export class AlpineWorld {
     this.scenery.dispose();
     this.models.dispose();
     this.water.dispose();
+    this.waterShowcase.dispose();
     this.brushCursor.geometry.dispose();
     this.brushCursor.material.dispose();
     this.renderer.dispose();
@@ -240,7 +271,10 @@ export class AlpineWorld {
     sun.shadow.camera.bottom = -26;
     sun.shadow.camera.near = 1;
     sun.shadow.camera.far = 90;
-    sun.shadow.bias = -0.0004;
+    // 低多边形大平面容易和自身阴影发生深度竞争，形成整片摩尔纹。
+    sun.shadow.bias = -0.0012;
+    sun.shadow.normalBias = 0.075;
+    sun.shadow.radius = 1.5;
     this.scene.add(sun);
 
     const rim = new THREE.DirectionalLight("#b8d6dd", 1.3);
@@ -313,10 +347,11 @@ export class AlpineWorld {
   }
 
   private syncControlMode(): void {
-    this.controls.mouseButtons.LEFT = this.tool === "orbit" ? THREE.MOUSE.ROTATE : (-1 as THREE.MOUSE);
+    const orbitMode = this.showcaseActive || this.tool === "orbit";
+    this.controls.mouseButtons.LEFT = orbitMode ? THREE.MOUSE.ROTATE : (-1 as THREE.MOUSE);
     this.controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
     this.controls.mouseButtons.RIGHT = -1 as THREE.MOUSE;
-    this.controls.touches.ONE = this.tool === "orbit" ? THREE.TOUCH.ROTATE : (-1 as THREE.TOUCH);
+    this.controls.touches.ONE = orbitMode ? THREE.TOUCH.ROTATE : (-1 as THREE.TOUCH);
     const colors: Record<TerrainTool, string> = {
       orbit: "#dbe8df",
       carve: "#d66c4d",
@@ -324,10 +359,11 @@ export class AlpineWorld {
       smooth: "#78aab0",
     };
     this.brushCursor.material.color.set(colors[this.tool]);
-    this.renderer.domElement.dataset.tool = this.tool;
+    this.renderer.domElement.dataset.tool = this.showcaseActive ? "orbit" : this.tool;
   }
 
   private updatePointer(event: PointerEvent): THREE.Intersection | null {
+    if (this.showcaseActive) return null;
     const rect = this.renderer.domElement.getBoundingClientRect();
     this.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     this.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
@@ -370,7 +406,7 @@ export class AlpineWorld {
       event.stopPropagation();
       return;
     }
-    if (event.button !== 0 || this.tool === "orbit") return;
+    if (event.button !== 0 || this.tool === "orbit" || this.showcaseActive) return;
     const hit = this.updatePointer(event);
     if (!hit) return;
     event.preventDefault();
@@ -418,8 +454,9 @@ export class AlpineWorld {
     const instantFps = 1 / deltaTime;
     this.fps = THREE.MathUtils.lerp(this.fps, instantFps, 0.06);
     this.controls.update();
-    if (this.waterActive) this.water.step(deltaTime, this.flowRate);
-    this.water.updateMarker(time, this.waterActive);
+    if (!this.showcaseActive && this.waterActive) this.water.step(deltaTime, this.flowRate, this.flowDelay);
+    if (this.showcaseActive) this.waterShowcase.update(time);
+    else this.water.updateMarker(time, this.waterActive);
     if (this.brushCursor.visible) this.brushCursor.position.y += Math.sin(time * 0.005) * 0.0008;
 
     if (time - this.statsTime > 250) {
@@ -431,6 +468,6 @@ export class AlpineWorld {
         fps: Math.min(99, Math.round(this.fps)),
       });
     }
-    this.renderer.render(this.scene, this.camera);
+    this.renderer.render(this.showcaseActive ? this.waterShowcase.scene : this.scene, this.camera);
   };
 }

@@ -98,6 +98,8 @@ export function AlpineFlowLab() {
   const [brushStrength, setBrushStrength] = useState(5.4);
   const [waterActive, setWaterActive] = useState(false);
   const [flowRate, setFlowRate] = useState(1);
+  const [flowDelay, setFlowDelay] = useState(0.1);
+  const [showcaseActive, setShowcaseActive] = useState(false);
   const [stats, setStats] = useState<WorldStats>(initialStats);
   const [saves, setSaves] = useState<SavedMapMeta[]>(parseSavesMeta);
   const [saveName, setSaveName] = useState("");
@@ -145,6 +147,8 @@ export function AlpineFlowLab() {
   useEffect(() => worldRef.current?.setBrushStrength(brushStrength), [brushStrength]);
   useEffect(() => worldRef.current?.setWaterActive(waterActive), [waterActive]);
   useEffect(() => worldRef.current?.setFlowRate(flowRate), [flowRate]);
+  useEffect(() => worldRef.current?.setFlowDelay(flowDelay), [flowDelay]);
+  useEffect(() => worldRef.current?.setShowcaseActive(showcaseActive), [showcaseActive]);
 
   // Prevent browser context menu & right-click gestures across the entire page
   useEffect(() => {
@@ -240,6 +244,13 @@ export function AlpineFlowLab() {
 
   const resetTerrain = useCallback(() => worldRef.current?.resetTerrain(), []);
   const clearWater = useCallback(() => worldRef.current?.clearWater(), []);
+  const toggleShowcase = useCallback(() => {
+    setShowcaseActive((active) => {
+      const next = !active;
+      if (next) setTool("orbit");
+      return next;
+    });
+  }, []);
 
   return (
     <main className="lab-shell" id="top">
@@ -256,7 +267,15 @@ export function AlpineFlowLab() {
           </span>
         </a>
         <div className="topbar-actions">
-          <span className="seed-chip"><i />SEED&nbsp; {seed}</span>
+          <span className="seed-chip"><i />{showcaseActive ? "WATER TEST RANGE" : <>SEED&nbsp; {seed}</>}</span>
+          <button
+            className={`scene-mode-button ${showcaseActive ? "is-active" : ""}`}
+            onClick={toggleShowcase}
+            aria-pressed={showcaseActive}
+          >
+            <Waves size={15} />
+            <span>{showcaseActive ? "返回模拟场景" : "水体测试场"}</span>
+          </button>
           <button className="icon-button" onClick={() => worldRef.current?.focusHome()} aria-label="返回最佳视角" title="返回最佳视角">
             <Focus size={17} />
           </button>
@@ -266,11 +285,13 @@ export function AlpineFlowLab() {
         </div>
       </header>
 
-      <button className="regenerate-fab" onClick={regenerate} disabled={renderError} aria-label="重新生成山脉" title="重新生成">
-        <RefreshCw size={18} />
-      </button>
+      {!showcaseActive && (
+        <button className="regenerate-fab" onClick={regenerate} disabled={renderError} aria-label="重新生成山脉" title="重新生成">
+          <RefreshCw size={18} />
+        </button>
+      )}
 
-      <aside className="terrain-readout glass-panel" aria-label="地形与水流数据">
+      {!showcaseActive && <aside className="terrain-readout glass-panel" aria-label="地形与水流数据">
         <div className="readout-heading">
           <span><Sparkles size={15} /> LIVE PROFILE</span>
           <b>{stats.fps} FPS</b>
@@ -301,6 +322,19 @@ export function AlpineFlowLab() {
           <label>
             <span>流量 <b>{flowRate.toFixed(1)}×</b></span>
             <input type="range" min="0.2" max="2.4" step="0.1" value={flowRate} onChange={(event) => setFlowRate(Number(event.target.value))} disabled={renderError} />
+          </label>
+          <label>
+            <span>流速 <b>{flowDelay.toFixed(2)} 秒/格</b></span>
+            <input
+              type="range"
+              min="0.02"
+              max="0.5"
+              step="0.01"
+              value={flowDelay}
+              onChange={(event) => setFlowDelay(Number(event.target.value))}
+              disabled={renderError}
+              aria-label="水流每格停留时间"
+            />
           </label>
           <div className="panel-actions">
             <button onClick={clearWater} disabled={renderError}><Eraser size={13} /> 清空水体</button>
@@ -337,9 +371,9 @@ export function AlpineFlowLab() {
           )}
         </section>
         <p className="scale-note">* 艺术化模拟单位，用于比较相对变化</p>
-      </aside>
+      </aside>}
 
-      <nav className="tool-dock glass-panel" aria-label="地形工具">
+      {!showcaseActive && <nav className="tool-dock glass-panel" aria-label="地形工具">
         <div className="tool-group">
           {toolOptions.map((option) => {
             const Icon = option.icon;
@@ -372,11 +406,19 @@ export function AlpineFlowLab() {
         <button className={`water-quick ${waterActive ? "is-on" : ""}`} onClick={() => setWaterActive((active) => !active)} disabled={renderError} aria-label={waterActive ? "暂停水流" : "开启水流"}>
           <Waves size={17} /><span>{waterActive ? "水流中" : "开启水流"}<small>SPACE</small></span>
         </button>
-      </nav>
+      </nav>}
 
-      <div className="scene-index" aria-hidden="true">
+      {!showcaseActive && <div className="scene-index" aria-hidden="true">
         <span>46° 48′ N</span><i /><span>{tool.toUpperCase()} MODE</span><i /><span>{waterActive ? "MELT ACTIVE" : "MELT PAUSED"}</span>
-      </div>
+      </div>}
+
+      {showcaseActive && (
+        <section className="showcase-guide glass-panel" aria-label="水体测试场图例">
+          <div><b>01 河流</b><span>细曲线浪脊沿流向伸展</span></div>
+          <div><b>02 湖泊</b><span>有体积的方向波与局部小浪</span></div>
+          <div><b>03 瀑布</b><span>窄水纹、水幕与落点白沫</span></div>
+        </section>
+      )}
 
       {!ready && (
         <div className="loading-screen">
