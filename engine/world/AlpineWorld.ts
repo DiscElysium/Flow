@@ -8,6 +8,8 @@ import { ModelManager } from "@/engine/models/ModelManager";
 import { MODELS_CONFIG } from "@/engine/models/presets";
 import { WaterSimulation } from "@/engine/water/WaterSimulation";
 
+const IRRIGATION_UPDATE_INTERVAL = 0.4;
+
 export class AlpineWorld {
   readonly terrain: TerrainSystem;
   readonly water: WaterSimulation;
@@ -24,9 +26,13 @@ export class AlpineWorld {
   private readonly brushCursor: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>;
   private frame = 0;
   private disposed = false;
+  private editMode = true;
   private tool: TerrainTool = "orbit";
   private brushRadius: number = WORLD_CONFIG.brush.radius;
   private brushStrength: number = WORLD_CONFIG.brush.strength;
+  private irrigationRadius: number = WORLD_CONFIG.water.irrigationRadius;
+  private _waterCheckAccum = 0;
+  private readonly waterProximity: Uint8Array;
   private waterActive = false;
   private flowRate = 1;
   private editing = false;
@@ -70,9 +76,11 @@ export class AlpineWorld {
     this.terrain = new TerrainSystem(this.scene, seed);
     this.scenery = new ScenerySystem(this.scene, this.terrain, seed);
     this.water = new WaterSimulation(this.scene, this.terrain);
+    this.waterProximity = new Uint8Array(this.terrain.resolution * this.terrain.resolution);
     this.models = new ModelManager(this.scene, this.terrain, MODELS_CONFIG);
     this.models.attachScenery(this.scenery);
     this.models.initialize().catch((err) => console.warn("Model loading failed:", err));
+    this.updateIrrigation();
     this.brushCursor = this.createBrushCursor();
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
@@ -100,12 +108,18 @@ export class AlpineWorld {
   }
 
   setTool(tool: TerrainTool): void {
-    this.tool = tool;
+    this.tool = this.editMode ? tool : "orbit";
     this.brushCursor.visible = false;
     this.syncControlMode();
   }
 
+  setEditMode(enabled: boolean): void {
+    this.editMode = enabled;
+    if (!enabled) this.setTool("orbit");
+  }
+
   setBrushRadius(radius: number): void {
+    if (!this.editMode) return;
     this.brushRadius = THREE.MathUtils.clamp(radius, WORLD_CONFIG.brush.minRadius, WORLD_CONFIG.brush.maxRadius);
     this.brushCursor.scale.setScalar(this.brushRadius);
   }
@@ -119,7 +133,17 @@ export class AlpineWorld {
   }
 
   setFlowRate(rate: number): void {
-    this.flowRate = THREE.MathUtils.clamp(rate, 0.2, 2.4);
+    this.flowRate = THREE.MathUtils.clamp(rate, 0.2, 10);
+  }
+
+  setIrrigationRadius(radius: number): void {
+    if (!this.editMode) return;
+    this.irrigationRadius = THREE.MathUtils.clamp(
+      radius,
+      WORLD_CONFIG.water.minIrrigationRadius,
+      WORLD_CONFIG.water.maxIrrigationRadius,
+    );
+    this.updateIrrigation();
   }
 
   regenerate(seed: string): void {
@@ -128,6 +152,7 @@ export class AlpineWorld {
     this.scenery.regenerate(seed);
     this.water.syncTerrain(false);
     this.water.setSource(this.terrain.sourceIndex);
+    this.updateIrrigation();
     // Re-dock models to new terrain surface
     this.models.refreshHeights();
     // Re-apply scenery replacement if configured (placements changed with new seed)
@@ -152,10 +177,12 @@ export class AlpineWorld {
     this.scenery.refreshHeights();
     this.models.refreshHeights();
     this.water.syncTerrain(true);
+    this.updateIrrigation();
   }
 
   clearWater(): void {
     this.water.clear();
+    this.updateIrrigation();
   }
 
   get seed(): string {
@@ -172,6 +199,7 @@ export class AlpineWorld {
       minHeight: this.terrain.minHeight,
       maxHeight: this.terrain.maxHeight,
       seed: this.currentSeed,
+      groundPaint: this.terrain.getGroundPaintState(),
       modelInstances: this.models.getInstanceData(),
     };
   }
@@ -187,6 +215,7 @@ export class AlpineWorld {
     // 地形需要通过 regenerate 来重建几何体，但 regenerate 会覆盖 heights。
     // 所以这里直接用 TerrainSystem 的 rebuildGeometry 对应的方案：直接替换 + 重建
     this.terrain["rebuildGeometry"]();
+    this.terrain.loadGroundPaintState(data.groundPaint);
     this.scenery.refreshHeights();
     // 恢复外部模型（terrain 重建后高度已就绪）
     if (data.modelInstances && data.modelInstances.length > 0) {
@@ -200,6 +229,7 @@ export class AlpineWorld {
     this.water["recentInflow"].fill(0);
     this.water.setSource(this.terrain.sourceIndex);
     this.water["updateGeometry"]();
+    this.updateIrrigation();
   }
 
   focusHome(): void {
@@ -322,6 +352,8 @@ export class AlpineWorld {
       carve: "#d66c4d",
       raise: "#6d9a70",
       smooth: "#78aab0",
+      "paint-green": "#4f8172",
+      "paint-yellow": "#d6bd61",
     };
     this.brushCursor.material.color.set(colors[this.tool]);
     this.renderer.domElement.dataset.tool = this.tool;
@@ -336,7 +368,7 @@ export class AlpineWorld {
     if (intersection) {
       this.cursorPoint = intersection.point.clone();
       this.hoverElevation = intersection.point.y;
-      if (this.tool !== "orbit") {
+      if (this.editMode && this.tool !== "orbit") {
         this.brushCursor.position.copy(intersection.point);
         this.brushCursor.position.y += 0.09;
         this.brushCursor.visible = true;
@@ -359,7 +391,11 @@ export class AlpineWorld {
     );
     if (changed) {
       this.editedInStroke = true;
-      this.water.syncTerrain(true);
+      if (this.isPaintTool()) {
+        this.scenery.updateTreeWatering((x, z) => this.terrain.isGreenAt(x, z));
+      } else {
+        this.water.syncTerrain(true);
+      }
     }
   }
 
@@ -370,7 +406,7 @@ export class AlpineWorld {
       event.stopPropagation();
       return;
     }
-    if (event.button !== 0 || this.tool === "orbit") return;
+    if (event.button !== 0 || !this.editMode || this.tool === "orbit") return;
     const hit = this.updatePointer(event);
     if (!hit) return;
     event.preventDefault();
@@ -390,8 +426,10 @@ export class AlpineWorld {
     if (!this.editing) return;
     this.editing = false;
     if (this.editedInStroke) {
-      this.scenery.refreshHeights();
-      this.models.refreshHeights();
+      if (!this.isPaintTool()) {
+        this.scenery.refreshHeights();
+        this.models.refreshHeights();
+      }
       this.handlers.onTerrainEdit?.();
     }
   };
@@ -420,6 +458,14 @@ export class AlpineWorld {
     this.controls.update();
     if (this.waterActive) this.water.step(deltaTime, this.flowRate);
     this.water.updateMarker(time, this.waterActive);
+
+    // Keep terrain and trees synchronized with visible water without doing the work every frame.
+    this._waterCheckAccum += deltaTime;
+    if (this._waterCheckAccum > IRRIGATION_UPDATE_INTERVAL) {
+      this._waterCheckAccum = 0;
+      this.updateIrrigation();
+    }
+
     if (this.brushCursor.visible) this.brushCursor.position.y += Math.sin(time * 0.005) * 0.0008;
 
     if (time - this.statsTime > 250) {
@@ -428,9 +474,20 @@ export class AlpineWorld {
         elevation: this.hoverElevation,
         peak: this.terrain.maxHeight,
         waterVolume: this.water.volume,
+        wateredYellowPercent: this.terrain.getWateredYellowPercentage(),
         fps: Math.min(99, Math.round(this.fps)),
       });
     }
     this.renderer.render(this.scene, this.camera);
   };
+
+  private updateIrrigation(): void {
+    this.water.fillProximityMask(this.waterProximity, this.irrigationRadius);
+    this.terrain.updateWateredArea(this.waterProximity);
+    this.scenery.updateTreeWatering((x, z) => this.terrain.isGreenAt(x, z));
+  }
+
+  private isPaintTool(): boolean {
+    return this.tool === "paint-green" || this.tool === "paint-yellow";
+  }
 }

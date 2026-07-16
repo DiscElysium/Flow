@@ -32,16 +32,18 @@ export class WaterSimulation {
       depthWrite: false,
       side: THREE.DoubleSide,
       uniforms: {
-        // ── 颜色 ──
+        // ── 颜色（三阶渐变：浅 → 中 → 深）──
         shallowColor:       { value: new THREE.Color("#47b5c7") },   // 水晶蓝
-        deepColor:          { value: new THREE.Color("#0d3b66") },   // 深海蓝（零绿色倾向）
+        midColor:           { value: new THREE.Color("#258f9e") },   // 中间过渡色 — 碧蓝
+        deepColor:          { value: new THREE.Color("#051f42") },   // 深海蓝（纯蓝，零绿）
         sunColor:           { value: new THREE.Color("#fff4d9") },
         uSpecularColor:     { value: new THREE.Color("#fff8e8") },
         uFoamColor:         { value: new THREE.Color("#e8f4f0") },
 
-        // ── 深度阈值 ──
-        uShallowDepth:      { value: 0.03 },   // 浅水深度参考 (m)
-        uDeepDepth:         { value: 1.50 },   // 深水深度参考 (m)；50 倍更宽过渡
+        // ── 深度阈值（三阶过渡）──
+        uShallowDepth:      { value: 0.05 },   // 浅→中 过渡起点 (m)
+        uMidDepth:          { value: 1.20 },   // 浅→中 过渡终点 / 中→深 过渡起点 (m)
+        uDeepDepth:         { value: 3.50 },   // 中→深 过渡终点 (m)
         uFoamThreshold:     { value: 0.04 },   // 泡沫最大深度
         uFoamFadeStart:     { value: 0.008 },  // 泡沫开始淡入深度
 
@@ -50,20 +52,20 @@ export class WaterSimulation {
         uAmbientFloor:      { value: 0.58 },
         uDiffuseRange:      { value: 0.42 },
         uSpecularPower:     { value: 180.0 },
-        uSpecularStrength:  { value: 0.55 },
+        uSpecularStrength:  { value: 0.78 },
 
         // ── 波纹 ──
         uTime:              { value: 0.0 },
         uRippleStrength:    { value: 0.042 },
-        uShallowRippleBoost:{ value: 0.65 },   // 浅水区波纹额外增强
+        uShallowRippleBoost:{ value: 0.65 },
 
         // ── Fresnel ──
         uFresnelPower:      { value: 2.2 },
         uFresnelMix:        { value: 0.28 },
 
         // ── Alpha ──
-        uAlphaFloor:        { value: 0.44 },
-        uAlphaDepthRange:   { value: 0.32 },
+        uAlphaFloor:        { value: 0.52 },
+        uAlphaDepthRange:   { value: 0.38 },
         uAlphaFresnel:      { value: 0.12 },
         uDiscardDepth:      { value: 0.004 },
       },
@@ -80,11 +82,13 @@ export class WaterSimulation {
       `,
       fragmentShader: `
         uniform vec3 shallowColor;
+        uniform vec3 midColor;
         uniform vec3 deepColor;
         uniform vec3 sunColor;
         uniform vec3 uSpecularColor;
         uniform vec3 uFoamColor;
         uniform float uShallowDepth;
+        uniform float uMidDepth;
         uniform float uDeepDepth;
         uniform float uFoamThreshold;
         uniform float uFoamFadeStart;
@@ -148,9 +152,12 @@ export class WaterSimulation {
           float specFresnel = 0.25 + fresnel * 0.75;
           vec3 specularContrib = uSpecularColor * specular * specFresnel;
 
-          // ── 深度颜色混合 ──
-          float depthMix = smoothstep(uShallowDepth, uDeepDepth, vDepth);
-          vec3 color = mix(shallowColor, deepColor, depthMix) * diffuse + specularContrib;
+          // ── 深度颜色混合（三阶渐变：浅→中→深）──
+          float midMix = smoothstep(uShallowDepth, uMidDepth, vDepth);
+          float deepMix = smoothstep(uMidDepth, uDeepDepth, vDepth);
+          vec3 waterColor = mix(shallowColor, midColor, midMix);
+          waterColor = mix(waterColor, deepColor, deepMix);
+          vec3 color = waterColor * diffuse + specularContrib;
 
           // ── 岸边泡沫 ──
           float foamAmount = 1.0 - smoothstep(uFoamFadeStart, uFoamThreshold, vDepth);
@@ -162,8 +169,9 @@ export class WaterSimulation {
           // ── Fresnel 暖光边缘 ──
           color = mix(color, sunColor, fresnel * uFresnelMix);
 
-          // ── Alpha ──
-          float alpha = uAlphaFloor + depthMix * uAlphaDepthRange + fresnel * uAlphaFresnel;
+          // ── Alpha（随深度整体增加，最深水最不透明）──
+          float depthAlpha = smoothstep(uShallowDepth, uDeepDepth, vDepth);
+          float alpha = uAlphaFloor + depthAlpha * uAlphaDepthRange + fresnel * uAlphaFresnel;
           gl_FragColor = vec4(color, alpha);
         }
       `,
@@ -265,6 +273,48 @@ export class WaterSimulation {
     const core = this.marker.getObjectByName("source-core") as THREE.Mesh | undefined;
     if (core && core.material instanceof THREE.MeshStandardMaterial) {
       core.material.emissiveIntensity = active ? 1.25 + Math.sin(time * 0.006) * 0.25 : 0.32;
+    }
+  }
+
+  /** 查询任意世界坐标的水深（双线性插值），供外部系统查询 */
+  depthAt(worldX: number, worldZ: number): number {
+    const half = WORLD_CONFIG.size / 2;
+    const fx = (worldX + half) / this.terrain.cellSize;
+    const fz = (worldZ + half) / this.terrain.cellSize;
+    const x0 = Math.max(0, Math.min(this.resolution - 2, Math.floor(fx)));
+    const z0 = Math.max(0, Math.min(this.resolution - 2, Math.floor(fz)));
+    const tx = fx - x0;
+    const tz = fz - z0;
+    const idx = (z0: number, x0: number) => z0 * this.resolution + x0;
+    return THREE.MathUtils.lerp(
+      THREE.MathUtils.lerp(this.depth[idx(z0, x0)], this.depth[idx(z0, x0 + 1)], tx),
+      THREE.MathUtils.lerp(this.depth[idx(z0 + 1, x0)], this.depth[idx(z0 + 1, x0 + 1)], tx),
+      tz,
+    );
+  }
+
+  /** Mark every terrain vertex within `radius` world units of visible water. */
+  fillProximityMask(target: Uint8Array, radius: number): void {
+    if (target.length !== this.depth.length) return;
+    target.fill(0);
+
+    const radiusInCells = Math.ceil(radius / this.terrain.cellSize);
+    const radiusSquared = radius * radius;
+    for (let waterIndex = 0; waterIndex < this.depth.length; waterIndex += 1) {
+      if (this.depth[waterIndex] < 0.004) continue;
+      const waterX = waterIndex % this.resolution;
+      const waterZ = Math.floor(waterIndex / this.resolution);
+
+      for (let dz = -radiusInCells; dz <= radiusInCells; dz += 1) {
+        const z = waterZ + dz;
+        if (z < 0 || z >= this.resolution) continue;
+        for (let dx = -radiusInCells; dx <= radiusInCells; dx += 1) {
+          const x = waterX + dx;
+          if (x < 0 || x >= this.resolution) continue;
+          const distanceSquared = (dx * dx + dz * dz) * this.terrain.cellSize * this.terrain.cellSize;
+          if (distanceSquared <= radiusSquared) target[z * this.resolution + x] = 1;
+        }
+      }
     }
   }
 

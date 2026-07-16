@@ -50,7 +50,9 @@ button { color: inherit; }
 .world-canvas canvas:active { cursor: grabbing; }
 .world-canvas canvas[data-tool="carve"],
 .world-canvas canvas[data-tool="raise"],
-.world-canvas canvas[data-tool="smooth"] { cursor: crosshair; }
+.world-canvas canvas[data-tool="smooth"],
+.world-canvas canvas[data-tool="paint-green"],
+.world-canvas canvas[data-tool="paint-yellow"] { cursor: crosshair; }
 
 .atmosphere-grain {
   position: absolute;
@@ -118,6 +120,24 @@ button { color: inherit; }
 }
 
 .topbar-actions { display: flex; align-items: center; gap: 8px; }
+
+.mode-toggle {
+  height: 34px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .24);
+  color: #4f5e58;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.mode-toggle i { width: 6px; height: 6px; border-radius: 50%; background: #678777; }
+.mode-toggle.is-play i { background: #c49d44; box-shadow: 0 0 0 4px rgba(196, 157, 68, .12); }
+.mode-toggle small { color: #81908a; font-family: var(--font-geist-mono), monospace; font-size: 7px; }
 
 .seed-chip {
   height: 34px;
@@ -384,6 +404,7 @@ input[type="range"]::-moz-range-track { height: 2px; border-radius: 2px; backgro
 input[type="range"]::-moz-range-thumb { width: 9px; height: 9px; border: 2px solid #e8eee8; border-radius: 50%; background: #45695b; }
 
 .panel-actions { margin-top: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.panel-actions.single { grid-template-columns: 1fr; }
 .panel-actions button {
   height: 30px;
   padding: 0 7px;

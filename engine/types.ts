@@ -1,4 +1,4 @@
-export type TerrainTool = "orbit" | "carve" | "raise" | "smooth";
+export type TerrainTool = "orbit" | "carve" | "raise" | "smooth" | "paint-green" | "paint-yellow";
 
 export type MountainData = {
   heights: Float32Array;
@@ -12,6 +12,7 @@ export type WorldStats = {
   elevation: number;
   peak: number;
   waterVolume: number;
+  wateredYellowPercent: number;
   fps: number;
 };
 
@@ -29,6 +30,8 @@ export type MapSaveData = {
   minHeight: number;
   maxHeight: number;
   seed: string;
+  /** Permanently green ground painted by the user. Omitted by older saves. */
+  groundPaint?: number[];
   /** Placed custom model instances (Y derived from terrain on load). */
   modelInstances: StoredModelInstance[];
 };
@@ -89,4 +92,3 @@ export type StoredModelInstance = {
   rotation: number;
   scale: number;
 };
-

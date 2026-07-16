@@ -14,6 +14,9 @@ export const WORLD_CONFIG = {
     flow: 0.14,
     substeps: 3,
     evaporation: 0.00001,
+    irrigationRadius: 3,
+    minIrrigationRadius: 0.5,
+    maxIrrigationRadius: 8,
   },
   camera: {
     fov: 43,
@@ -25,13 +28,20 @@ export const WORLD_CONFIG = {
 } as const;
 
 export const TERRAIN_PALETTE = {
-  valley: "#87947a",
-  meadow: "#71856b",
-  pine: "#506b5c",
-  earth: "#786f62",
+  valley: "#dfcf8c",
+  meadow: "#d8c477",
+  pine: "#c6ae64",
+  earth: "#9b8663",
   rock: "#858681",
   highRock: "#a5a8a5",
   snowShadow: "#c9d7d8",
   snow: "#eef2ee",
 } as const;
 
+/** The original cool terrain palette, restored wherever flowing water irrigates the ground. */
+export const WATERED_TERRAIN_PALETTE = {
+  valley: "#87947a",
+  meadow: "#71856b",
+  pine: "#506b5c",
+  earth: "#667866",
+} as const;
