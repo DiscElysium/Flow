@@ -1,7 +1,9 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { AmbientAudioSystem } from "@/engine/audio/AmbientAudioSystem";
 import { WORLD_CONFIG } from "@/engine/config";
 import { ScenerySystem } from "@/engine/scenery/ScenerySystem";
+import { SkyWildlifeSystem } from "@/engine/scenery/SkyWildlifeSystem";
 import { TerrainSystem } from "@/engine/terrain/TerrainSystem";
 import type { MapSaveData, TerrainTool, WorldEventHandlers } from "@/engine/types";
 import { ModelManager } from "@/engine/models/ModelManager";
@@ -24,6 +26,8 @@ export class AlpineWorld {
   private readonly camera: THREE.PerspectiveCamera;
   private readonly controls: OrbitControls;
   private readonly waterShowcase: WaterShowcaseScene;
+  private readonly skyWildlife: SkyWildlifeSystem;
+  private readonly ambientAudio: AmbientAudioSystem;
   private readonly resizeObserver: ResizeObserver;
   private readonly raycaster = new THREE.Raycaster();
   private readonly pointer = new THREE.Vector2();
@@ -50,6 +54,7 @@ export class AlpineWorld {
   private hoverElevation = 0;
   private cursorPoint: THREE.Vector3 | null = null;
   private showcaseActive = false;
+  private sourcePlacementActive = false;
   private readonly savedWorldCameraPosition = new THREE.Vector3();
   private readonly savedWorldCameraTarget = new THREE.Vector3();
 
@@ -85,11 +90,13 @@ export class AlpineWorld {
     this.terrain = new TerrainSystem(this.scene, seed);
     this.ocean = new OceanSystem(this.scene);
     this.scenery = new ScenerySystem(this.scene, this.terrain, seed);
+    this.skyWildlife = new SkyWildlifeSystem(this.scene, this.terrain, seed);
     this.water = new WaterSimulation(this.scene, this.terrain);
     this.waterProximity = new Uint8Array(this.terrain.resolution * this.terrain.resolution);
     this.models = new ModelManager(this.scene, this.terrain, MODELS_CONFIG);
     this.models.attachScenery(this.scenery);
     this.models.initialize().catch((err) => console.warn("Model loading failed:", err));
+    this.ambientAudio = new AmbientAudioSystem();
     this.updateIrrigation();
     this.brushCursor = this.createBrushCursor();
 
@@ -98,14 +105,14 @@ export class AlpineWorld {
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.055;
     this.controls.minDistance = 24;
-    this.controls.maxDistance = 240;
+    this.controls.maxDistance = 320;
     this.controls.minPolarAngle = 0.18;
     this.controls.maxPolarAngle = Math.PI * 0.475;
     this.controls.enablePan = true;
     this.controls.update();
     this.syncControlMode();
 
-    this.renderer.domElement.addEventListener("pointerdown", this.onPointerDown);
+    this.renderer.domElement.addEventListener("pointerdown", this.onPointerDown, true);
     this.renderer.domElement.addEventListener("pointermove", this.onPointerMove);
     this.renderer.domElement.addEventListener("pointerleave", this.onPointerLeave);
     this.renderer.domElement.addEventListener("contextmenu", this.onContextMenu);
@@ -125,7 +132,10 @@ export class AlpineWorld {
 
   setEditMode(enabled: boolean): void {
     this.editMode = enabled;
-    if (!enabled) this.setTool("orbit");
+    if (!enabled) {
+      this.finishSourcePlacement();
+      this.setTool("orbit");
+    }
   }
 
   setBrushRadius(radius: number): void {
@@ -163,6 +173,7 @@ export class AlpineWorld {
   setShowcaseActive(active: boolean): void {
     if (this.showcaseActive === active) return;
     this.showcaseActive = active;
+    this.finishSourcePlacement();
     this.brushCursor.visible = false;
     this.editing = false;
     if (active) {
@@ -179,9 +190,11 @@ export class AlpineWorld {
   }
 
   regenerate(seed: string): void {
+    this.finishSourcePlacement();
     this.currentSeed = seed;
     this.terrain.regenerate(seed);
     this.scenery.regenerate(seed);
+    this.skyWildlife.regenerate(seed);
     this.water.syncTerrain(false);
     this.water.setSource(this.terrain.sourceIndex);
     this.updateIrrigation();
@@ -238,6 +251,7 @@ export class AlpineWorld {
 
   /** 从快照恢复地形与水体的完整状态 */
   loadSaveState(data: MapSaveData): void {
+    this.finishSourcePlacement();
     this.currentSeed = data.seed;
     this.terrain.heights = new Float32Array(data.heights);
     this.terrain.sourceIndex = data.sourceIndex;
@@ -249,6 +263,7 @@ export class AlpineWorld {
     this.terrain["rebuildGeometry"]();
     this.terrain.loadGroundPaintState(data.groundPaint);
     this.scenery.refreshHeights();
+    this.skyWildlife.regenerate(data.seed);
     // 恢复外部模型（terrain 重建后高度已就绪）
     if (data.modelInstances && data.modelInstances.length > 0) {
       this.models.loadInstanceData(data.modelInstances).catch((err) =>
@@ -276,17 +291,19 @@ export class AlpineWorld {
     cancelAnimationFrame(this.frame);
     this.resizeObserver.disconnect();
     this.controls.dispose();
-    this.renderer.domElement.removeEventListener("pointerdown", this.onPointerDown);
+    this.renderer.domElement.removeEventListener("pointerdown", this.onPointerDown, true);
     this.renderer.domElement.removeEventListener("pointermove", this.onPointerMove);
     this.renderer.domElement.removeEventListener("pointerleave", this.onPointerLeave);
     this.renderer.domElement.removeEventListener("contextmenu", this.onContextMenu);
     window.removeEventListener("pointerup", this.onPointerUp);
     this.terrain.dispose();
     this.scenery.dispose();
+    this.skyWildlife.dispose();
     this.models.dispose();
     this.water.dispose();
     this.ocean.dispose();
     this.waterShowcase.dispose();
+    this.ambientAudio.dispose();
     this.brushCursor.geometry.dispose();
     this.brushCursor.material.dispose();
     this.renderer.dispose();
@@ -318,7 +335,7 @@ export class AlpineWorld {
 
   private createAtmosphere(): void {
     const sky = new THREE.Mesh(
-      new THREE.SphereGeometry(280, 20, 12),
+      new THREE.SphereGeometry(360, 20, 12),
       new THREE.ShaderMaterial({
         side: THREE.BackSide,
         depthWrite: false,
@@ -352,7 +369,7 @@ export class AlpineWorld {
     this.scene.add(sky);
 
     const base = new THREE.Mesh(
-      new THREE.CircleGeometry(238, 48),
+      new THREE.CircleGeometry(310, 48),
       new THREE.MeshStandardMaterial({ color: "#74877d", roughness: 1, flatShading: true }),
     );
     base.rotation.x = -Math.PI / 2;
@@ -396,6 +413,7 @@ export class AlpineWorld {
     };
     this.brushCursor.material.color.set(colors[this.tool]);
     this.renderer.domElement.dataset.tool = this.showcaseActive ? "orbit" : this.tool;
+    this.renderer.domElement.dataset.sourcePlacement = this.sourcePlacementActive ? "active" : "idle";
   }
 
   private updatePointer(event: PointerEvent): THREE.Intersection | null {
@@ -408,13 +426,38 @@ export class AlpineWorld {
     if (intersection) {
       this.cursorPoint = intersection.point.clone();
       this.hoverElevation = intersection.point.y;
-      if (this.editMode && this.tool !== "orbit") {
+      if (this.editMode && this.tool !== "orbit" && !this.sourcePlacementActive) {
         this.brushCursor.position.copy(intersection.point);
         this.brushCursor.position.y += 0.09;
         this.brushCursor.visible = true;
       }
     }
     return intersection;
+  }
+
+  private moveSourceTo(point: THREE.Vector3): void {
+    const sourceIndex = this.terrain.indexAt(point.x, point.z);
+    this.terrain.sourceIndex = sourceIndex;
+    this.water.setSource(sourceIndex);
+  }
+
+  private beginSourcePlacement(): void {
+    this.sourcePlacementActive = true;
+    this.editing = false;
+    this.brushCursor.visible = false;
+    this.water.setSourceEditing(true);
+    this.controls.enabled = false;
+    this.handlers.onWaterSourcePlacementChange?.(true);
+    this.syncControlMode();
+  }
+
+  private finishSourcePlacement(): void {
+    if (!this.sourcePlacementActive) return;
+    this.sourcePlacementActive = false;
+    this.water.setSourceEditing(false);
+    this.controls.enabled = true;
+    this.handlers.onWaterSourcePlacementChange?.(false);
+    this.syncControlMode();
   }
 
   private applyCurrentBrush(now: number): void {
@@ -446,8 +489,27 @@ export class AlpineWorld {
       event.stopPropagation();
       return;
     }
-    if (event.button !== 0 || !this.editMode || this.tool === "orbit" || this.showcaseActive) return;
+    if (event.button !== 0 || !this.editMode || this.showcaseActive) return;
     const hit = this.updatePointer(event);
+
+    if (this.sourcePlacementActive) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (!hit) return;
+      this.moveSourceTo(hit.point);
+      this.finishSourcePlacement();
+      return;
+    }
+
+    const sourceHit = this.water.raycastSource(this.raycaster);
+    if (sourceHit && (!hit || sourceHit.distance <= hit.distance + 0.2)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      this.beginSourcePlacement();
+      return;
+    }
+
+    if (this.tool === "orbit") return;
     if (!hit) return;
     event.preventDefault();
     this.editing = true;
@@ -458,7 +520,8 @@ export class AlpineWorld {
   };
 
   private onPointerMove = (event: PointerEvent): void => {
-    this.updatePointer(event);
+    const hit = this.updatePointer(event);
+    if (this.sourcePlacementActive && hit) this.moveSourceTo(hit.point);
     if (this.editing) this.applyCurrentBrush(performance.now());
   };
 
@@ -496,17 +559,27 @@ export class AlpineWorld {
     const instantFps = 1 / deltaTime;
     this.fps = THREE.MathUtils.lerp(this.fps, instantFps, 0.06);
     this.controls.update();
-    if (!this.showcaseActive && this.waterActive) this.water.step(deltaTime, this.flowRate, this.flowDelay);
+    const audioFocus = this.controls.target;
+    this.ambientAudio.update(deltaTime, {
+      viewDistance: this.camera.position.distanceTo(audioFocus),
+      waterPresence: this.showcaseActive ? 0 : this.waterPresenceNear(audioFocus.x, audioFocus.z),
+      forestPresence: this.showcaseActive ? 0 : this.scenery.greenForestPresenceAt(audioFocus.x, audioFocus.z),
+    });
+    if (!this.showcaseActive && this.waterActive && !this.sourcePlacementActive) {
+      this.water.step(deltaTime, this.flowRate, this.flowDelay);
+    }
     if (this.showcaseActive) this.waterShowcase.update(time);
     else {
       this.ocean.update(time);
+      this.skyWildlife.update(deltaTime, time);
       this.water.updateMarker(time, this.waterActive);
 
-      // Keep terrain and trees synchronized with visible water without doing the work every frame.
+      // Keep terrain, trees, and tiny ground cover synchronized without doing the work every frame.
       this._waterCheckAccum += deltaTime;
       if (this._waterCheckAccum > IRRIGATION_UPDATE_INTERVAL) {
+        const elapsed = this._waterCheckAccum;
         this._waterCheckAccum = 0;
-        this.updateIrrigation();
+        this.updateIrrigation(elapsed);
       }
     }
     if (this.brushCursor.visible) this.brushCursor.position.y += Math.sin(time * 0.005) * 0.0008;
@@ -524,10 +597,31 @@ export class AlpineWorld {
     this.renderer.render(this.showcaseActive ? this.waterShowcase.scene : this.scene, this.camera);
   };
 
-  private updateIrrigation(): void {
+  private updateIrrigation(elapsedSeconds = IRRIGATION_UPDATE_INTERVAL): void {
     this.water.fillProximityMask(this.waterProximity, this.irrigationRadius);
     this.terrain.updateWateredArea(this.waterProximity);
     this.scenery.updateTreeWatering((x, z) => this.terrain.isGreenAt(x, z));
+    this.scenery.updateGroundCoverWatering(
+      (x, z) => this.terrain.isWateredAt(x, z),
+      (x, z) => this.water.depthAt(x, z),
+      elapsedSeconds,
+    );
+  }
+
+  private waterPresenceNear(worldX: number, worldZ: number): number {
+    let strongest = 0;
+    const samples: ReadonlyArray<readonly [number, number, number]> = [
+      [0, 0, 1],
+      [1.4, 0, 0.9], [-1.4, 0, 0.9], [0, 1.4, 0.9], [0, -1.4, 0.9],
+      [3.2, 0, 0.7], [-3.2, 0, 0.7], [0, 3.2, 0.7], [0, -3.2, 0.7],
+      [2.3, 2.3, 0.72], [-2.3, 2.3, 0.72], [2.3, -2.3, 0.72], [-2.3, -2.3, 0.72],
+    ];
+    for (const [offsetX, offsetZ, distanceWeight] of samples) {
+      const depth = this.water.depthAt(worldX + offsetX, worldZ + offsetZ);
+      const audibleDepth = THREE.MathUtils.smoothstep(depth, 0.002, 0.035);
+      strongest = Math.max(strongest, audibleDepth * distanceWeight);
+    }
+    return strongest;
   }
 
   private isPaintTool(): boolean {

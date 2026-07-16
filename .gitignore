@@ -42,3 +42,6 @@ next-env.d.ts
 /.vinext/
 /outputs/
 /work/
+
+# Local Netlify folder
+.netlify

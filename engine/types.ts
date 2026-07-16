@@ -20,6 +20,7 @@ export type WorldEventHandlers = {
   onReady?: () => void;
   onStats?: (stats: WorldStats) => void;
   onTerrainEdit?: () => void;
+  onWaterSourcePlacementChange?: (placing: boolean) => void;
 };
 
 export type MapSaveData = {

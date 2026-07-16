@@ -84,6 +84,53 @@ export class TerrainSystem {
     return this.permanentlyGreen[index] !== 0 || this.watered[index] !== 0;
   }
 
+  /** Whether this point is green specifically because it is near visible water. */
+  isWateredAt(worldX: number, worldZ: number): boolean {
+    const { x, z } = this.worldToGrid(worldX, worldZ);
+    return this.watered[z * this.resolution + x] !== 0;
+  }
+
+  /** Pick a genuinely water-greened terrain point inside a world-space X band. */
+  findWateredGreenPointInXRange(
+    minWorldX: number,
+    maxWorldX: number,
+    random: () => number = Math.random,
+  ): THREE.Vector3 | null {
+    const half = WORLD_CONFIG.size * 0.5;
+    const startX = THREE.MathUtils.clamp(
+      Math.floor((Math.min(minWorldX, maxWorldX) + half) / this.cellSize),
+      0,
+      WORLD_CONFIG.segments - 1,
+    );
+    const endX = THREE.MathUtils.clamp(
+      Math.ceil((Math.max(minWorldX, maxWorldX) + half) / this.cellSize),
+      0,
+      WORLD_CONFIG.segments - 1,
+    );
+    let selectedX = -1;
+    let selectedZ = -1;
+    let candidates = 0;
+
+    for (let z = 0; z < WORLD_CONFIG.segments; z += 1) {
+      for (let x = startX; x <= endX; x += 1) {
+        const cellIndex = z * WORLD_CONFIG.segments + x;
+        if (this.greenableCells[cellIndex] === 0 || !this.cellHasWater(x, z)) continue;
+        candidates += 1;
+        if (random() <= 1 / candidates) {
+          selectedX = x;
+          selectedZ = z;
+        }
+      }
+    }
+
+    // Ignore a few isolated wet vertices; a visible green patch should exist
+    // before wildlife treats the river as established habitat.
+    if (candidates < 6 || selectedX < 0 || selectedZ < 0) return null;
+    const worldX = (selectedX + 0.5) * this.cellSize - half;
+    const worldZ = (selectedZ + 0.5) * this.cellSize - half;
+    return new THREE.Vector3(worldX, this.heightAt(worldX, worldZ), worldZ);
+  }
+
   getGroundPaintState(): number[] {
     return Array.from(this.permanentlyGreen);
   }
@@ -203,6 +250,12 @@ export class TerrainSystem {
     const z = Math.floor(index / this.resolution);
     const half = WORLD_CONFIG.size / 2;
     return new THREE.Vector3(x * this.cellSize - half, this.heights[index], z * this.cellSize - half);
+  }
+
+  /** Return the nearest terrain vertex for a world-space position. */
+  indexAt(worldX: number, worldZ: number): number {
+    const { x, z } = this.worldToGrid(worldX, worldZ);
+    return z * this.resolution + x;
   }
 
   dispose(): void {

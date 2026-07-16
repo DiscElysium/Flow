@@ -4,6 +4,10 @@ import { hashSeed, mulberry32, range } from "@/engine/math/random";
 import type { MountainData } from "@/engine/types";
 
 const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
+// Generate the full internal relief of a massive mountain, then compress it
+// vertically. Together with the larger world size this reads as a huge massif
+// seen in miniature, rather than as a single exaggerated high peak.
+const MASSIF_VERTICAL_SCALE = 0.72;
 
 function smoothstep(edge0: number, edge1: number, value: number): number {
   const t = clamp01((value - edge0) / (edge1 - edge0));
@@ -25,10 +29,146 @@ export class MountainGenerator {
     const cos = Math.cos(angle);
     const sin = Math.sin(angle);
     const peakCenters = [
-      { along: range(random, -0.5, -0.36), height: range(random, 12, 16), width: 0.25 },
-      { along: range(random, -0.08, 0.08), height: range(random, 21, 26), width: 0.31 },
-      { along: range(random, 0.34, 0.5), height: range(random, 13, 17), width: 0.26 },
+      {
+        along: range(random, -0.1, 0.1),
+        across: range(random, -0.07, 0.07),
+        height: range(random, 43, 49),
+        alongWidth: range(random, 0.26, 0.33),
+        acrossWidth: range(random, 0.2, 0.26),
+      },
+      {
+        along: range(random, -0.58, -0.34),
+        across: range(random, -0.16, 0.1),
+        height: range(random, 20, 28),
+        alongWidth: range(random, 0.16, 0.22),
+        acrossWidth: range(random, 0.12, 0.17),
+      },
+      {
+        along: range(random, 0.3, 0.55),
+        across: range(random, 0.06, 0.28),
+        height: range(random, 17, 24),
+        alongWidth: range(random, 0.17, 0.23),
+        acrossWidth: range(random, 0.13, 0.18),
+      },
+      {
+        along: range(random, -0.24, 0.03),
+        across: range(random, 0.24, 0.39),
+        height: range(random, 14, 20),
+        alongWidth: range(random, 0.15, 0.22),
+        acrossWidth: range(random, 0.12, 0.18),
+      },
+      {
+        along: range(random, 0.05, 0.34),
+        across: range(random, -0.38, -0.22),
+        height: range(random, 13, 18),
+        alongWidth: range(random, 0.16, 0.24),
+        acrossWidth: range(random, 0.13, 0.2),
+      },
+      {
+        along: range(random, -0.72, -0.52),
+        across: range(random, 0.28, 0.48),
+        height: range(random, 9, 15),
+        alongWidth: range(random, 0.14, 0.2),
+        acrossWidth: range(random, 0.12, 0.17),
+      },
     ];
+    const basinCenters = [
+      {
+        along: range(random, -0.34, -0.08),
+        across: range(random, 0.08, 0.28),
+        depth: range(random, 9, 15),
+        alongWidth: range(random, 0.14, 0.23),
+        acrossWidth: range(random, 0.12, 0.2),
+      },
+      {
+        along: range(random, 0.12, 0.42),
+        across: range(random, -0.25, 0.08),
+        depth: range(random, 7, 12),
+        alongWidth: range(random, 0.16, 0.26),
+        acrossWidth: range(random, 0.14, 0.22),
+      },
+    ];
+    const passCenters = [
+      {
+        along: range(random, -0.46, -0.28),
+        depth: range(random, 10, 15),
+        width: range(random, 0.045, 0.07),
+        noiseOffset: range(random, 300, 600),
+      },
+      {
+        along: range(random, 0.18, 0.36),
+        depth: range(random, 8, 13),
+        width: range(random, 0.05, 0.075),
+        noiseOffset: range(random, 600, 900),
+      },
+    ];
+    // Stratified, seeded features cover both faces of the massif. Pairing one
+    // feature on either side in each along-axis band avoids leaving a broad
+    // front or rear face as one uninterrupted plane.
+    const faceKnolls = Array.from({ length: 14 }, (_, index) => {
+      const side = index % 2 === 0 ? -1 : 1;
+      const band = Math.floor(index / 2);
+      const along = -0.72 + (band / 6) * 1.44 + range(random, -0.075, 0.075);
+      return {
+        along,
+        across: side * range(random, 0.25, 0.5),
+        height: range(random, 6.5, 13),
+        alongWidth: range(random, 0.085, 0.16),
+        acrossWidth: range(random, 0.08, 0.145),
+      };
+    });
+    const faceHollows = Array.from({ length: 10 }, (_, index) => {
+      const side = index % 2 === 0 ? -1 : 1;
+      const band = Math.floor(index / 2);
+      const along = -0.62 + (band / 4) * 1.24 + range(random, -0.07, 0.07);
+      return {
+        along,
+        across: side * range(random, 0.2, 0.47),
+        depth: range(random, 3.5, 7.5),
+        alongWidth: range(random, 0.075, 0.135),
+        acrossWidth: range(random, 0.065, 0.12),
+      };
+    });
+    const spurRidges = Array.from({ length: 8 }, (_, index) => {
+      const side = index % 2 === 0 ? -1 : 1;
+      const band = Math.floor(index / 2);
+      return {
+        side,
+        along: -0.58 + (band / 3) * 1.16 + range(random, -0.08, 0.08),
+        start: range(random, 0.08, 0.14),
+        length: range(random, 0.3, 0.46),
+        height: range(random, 6, 11),
+        width: range(random, 0.045, 0.085),
+        bend: range(random, -0.11, 0.11),
+        noiseOffset: range(random, 950, 1250),
+      };
+    });
+    // A separate lower range fills the middle-left of the map. Stratification
+    // guarantees broad coverage while seeded jitter keeps it from reading as
+    // a grid. These use max blending below so overlapping hills cannot stack
+    // into another summit as high as the primary peak.
+    const midlandPeaks = Array.from({ length: 12 }, (_, index) => {
+      const lane = index % 3;
+      const band = Math.floor(index / 3);
+      return {
+        x: -0.47 + lane * 0.16 + range(random, -0.055, 0.055),
+        z: -0.64 + (band / 3) * 1.28 + range(random, -0.09, 0.09),
+        height: range(random, 8, 17) * (1 - lane * 0.08),
+        xWidth: range(random, 0.075, 0.135),
+        zWidth: range(random, 0.09, 0.17),
+      };
+    });
+    const midlandValleys = Array.from({ length: 9 }, (_, index) => {
+      const lane = index % 3;
+      const band = Math.floor(index / 3);
+      return {
+        x: -0.41 + lane * 0.16 + range(random, -0.055, 0.055),
+        z: -0.5 + band * 0.5 + range(random, -0.095, 0.095),
+        depth: range(random, 5, 11),
+        xWidth: range(random, 0.06, 0.115),
+        zWidth: range(random, 0.075, 0.14),
+      };
+    });
 
     let minimum = Number.POSITIVE_INFINITY;
     let maximum = Number.NEGATIVE_INFINITY;
@@ -80,19 +220,116 @@ export class MountainGenerator {
         // a long shoulder instead of collapsing at the mountain's foot.
         const leftHalfMask = 1 - smoothstep(-0.34, 0.14, nx);
         const mountainEnvelope = Math.exp(
-          -Math.pow(Math.abs(mountainX) / 0.68, 2.3) - Math.pow(along / 0.92, 6),
+          -Math.pow(Math.abs(mountainX) / 0.76, 2.15)
+          -Math.pow(Math.abs(along) / 1.02, 5.2),
         ) * leftHalfMask * edgeFade * endFade;
+        const faceEnvelope = Math.exp(
+          -Math.pow(Math.abs(mountainX) / 0.86, 2.05)
+          -Math.pow(Math.abs(along) / 1.04, 5),
+        ) * (1 - smoothstep(-0.22, 0.2, nx)) * edgeFade * endFade;
+        const mainPeak = peakCenters[0];
+        const mainPeakDistance = Math.hypot(
+          (along - mainPeak.along) / (mainPeak.alongWidth * 1.15),
+          (across - mainPeak.across) / (mainPeak.acrossWidth * 1.15),
+        );
+        const midlandEnvelope = smoothstep(-0.72, -0.52, nx)
+          * (1 - smoothstep(-0.02, 0.14, nx))
+          * (1 - smoothstep(0.76, 0.96, Math.abs(nz)))
+          * smoothstep(0.72, 1.32, mainPeakDistance)
+          * edgeFade;
 
         let peaks = 0;
-        for (const peak of peakCenters) {
+        let peakShoulders = 0;
+        for (const [peakNumber, peak] of peakCenters.entries()) {
           const da = along - peak.along;
-          // Super-Gaussian caps stay broad and rounded near their summit,
-          // avoiding a stack of sharp cone-like peaks.
+          const dc = across - peak.across;
+          // The primary summit uses a softer dome so it has one readable high
+          // point without becoming a sharp cone. Side peaks stay broader.
+          const capPower = peakNumber === 0 ? 2.25 : 2.85;
           const roundedCap = Math.exp(
-            -Math.pow(Math.abs(da) / peak.width, 3.15)
-            -Math.pow(ridgeDistance / 0.205, 3.05),
+            -Math.pow(Math.abs(da) / peak.alongWidth, capPower)
+            -Math.pow(Math.abs(dc) / peak.acrossWidth, capPower),
           );
           peaks += peak.height * roundedCap;
+          const brokenShoulder = Math.exp(
+            -Math.pow(Math.abs(da) / (peak.alongWidth * 1.75), 2.1)
+            -Math.pow(Math.abs(dc) / (peak.acrossWidth * 1.8), 2.05),
+          );
+          peakShoulders += peak.height * 0.22 * brokenShoulder;
+        }
+        let basins = 0;
+        for (const basin of basinCenters) {
+          const da = along - basin.along;
+          const dc = across - basin.across;
+          basins += basin.depth * Math.exp(
+            -Math.pow(Math.abs(da) / basin.alongWidth, 2.4)
+            -Math.pow(Math.abs(dc) / basin.acrossWidth, 2.3),
+          );
+        }
+        let faceKnollHeight = 0;
+        for (const knoll of faceKnolls) {
+          const da = along - knoll.along;
+          const dc = across - knoll.across;
+          faceKnollHeight += knoll.height * Math.exp(
+            -Math.pow(Math.abs(da) / knoll.alongWidth, 2.35)
+            -Math.pow(Math.abs(dc) / knoll.acrossWidth, 2.25),
+          );
+        }
+        let faceHollowDepth = 0;
+        for (const hollow of faceHollows) {
+          const da = along - hollow.along;
+          const dc = across - hollow.across;
+          faceHollowDepth += hollow.depth * Math.exp(
+            -Math.pow(Math.abs(da) / hollow.alongWidth, 2.15)
+            -Math.pow(Math.abs(dc) / hollow.acrossWidth, 2.05),
+          );
+        }
+        let spurHeight = 0;
+        for (const spur of spurRidges) {
+          const sideAcross = (across - spineOffset) * spur.side;
+          const progress = clamp01((sideAcross - spur.start) / spur.length);
+          const reach = smoothstep(spur.start - 0.035, spur.start + 0.02, sideAcross)
+            * (1 - smoothstep(
+              spur.start + spur.length - 0.05,
+              spur.start + spur.length + 0.035,
+              sideAcross,
+            ));
+          const noisyBend = noise(
+            progress * 1.8 + spur.noiseOffset,
+            spur.noiseOffset * 0.27,
+          ) * 0.025;
+          const branchAlong = spur.along
+            + Math.sin(progress * Math.PI) * spur.bend
+            + noisyBend;
+          const branchWidth = spur.width * (0.72 + progress * 0.7);
+          const ridgeProfile = Math.exp(
+            -Math.pow(Math.abs(along - branchAlong) / branchWidth, 1.75),
+          );
+          spurHeight += spur.height
+            * (1 - progress * 0.42)
+            * (0.72 + Math.sin(progress * Math.PI) * 0.28)
+            * ridgeProfile
+            * reach;
+        }
+        let midlandPeakHeight = 0;
+        for (const peak of midlandPeaks) {
+          const dx = wx - peak.x;
+          const dz = wz - peak.z;
+          const dome = peak.height * Math.exp(
+            -Math.pow(Math.abs(dx) / peak.xWidth, 2.45)
+            -Math.pow(Math.abs(dz) / peak.zWidth, 2.3),
+          );
+          midlandPeakHeight = Math.max(midlandPeakHeight, dome);
+        }
+        let midlandValleyDepth = 0;
+        for (const valley of midlandValleys) {
+          const dx = wx - valley.x;
+          const dz = wz - valley.z;
+          const hollow = valley.depth * Math.exp(
+            -Math.pow(Math.abs(dx) / valley.xWidth, 2.2)
+            -Math.pow(Math.abs(dz) / valley.zWidth, 2.05),
+          );
+          midlandValleyDepth = Math.max(midlandValleyDepth, hollow);
         }
 
         let ridged = 0;
@@ -120,12 +357,56 @@ export class MountainGenerator {
         const westValley = Math.exp(-Math.pow(Math.abs(across - westValleySpine) * 8.5, 1.8));
         const valleyPulse = 0.58 + (noise(along * 3.7 - 12, 84.6) * 0.5 + 0.5) * 0.7;
         const branchingValleys = (eastValley * 6.5 + westValley * 4.8) * valleyPulse;
-        const mountainBody = 3.2
-          + wideShoulder * 7.2
-          + narrowRidge * 10.2
-          + eastRidge * 20
-          + westRidge * 15
-          + peaks;
+        let crossPasses = 0;
+        for (const pass of passCenters) {
+          const bend = noise(across * 2.2 + pass.noiseOffset, pass.noiseOffset * 0.31) * 0.055;
+          const passDistance = Math.abs(along - pass.along + bend);
+          const passReach = Math.exp(-Math.pow(Math.abs(across) / 0.7, 4));
+          crossPasses += pass.depth
+            * Math.exp(-Math.pow(passDistance / pass.width, 1.75))
+            * passReach;
+        }
+        // Noise-zero contours form winding gullies which divide the broad
+        // massif into connected blocks instead of one continuous stone base.
+        const fractureA = Math.exp(-Math.abs(noise(wx * 1.8 + 391, wz * 1.8 - 221)) * 14);
+        const fractureB = Math.exp(-Math.abs(noise(wx * 3.1 - 147, wz * 3.1 + 318)) * 18);
+        const fractureValleys = (fractureA * 7.5 + fractureB * 3.8)
+          * (0.35 + (1 - wideShoulder) * 0.65);
+        const macroHighlands = noise(wx * 0.78 + 233, wz * 0.78 - 164) * 0.5 + 0.5;
+        const regionalShelf = noise(wx * 1.42 - 118, wz * 1.42 + 205) * 0.5 + 0.5;
+        const blockField = noise(wx * 0.96 + 512, wz * 0.96 - 417) * 0.5 + 0.5;
+        const massifBase = (
+          2.8
+          + macroHighlands * 7.2
+          + smoothstep(0.5, 0.82, regionalShelf) * 4.8
+        ) * (0.58 + smoothstep(0.27, 0.73, blockField) * 0.7);
+        // Two thresholded noise shelves introduce genuine slope breaks. The
+        // thermal pass below softens their edges without erasing the cliffs.
+        const coarseCliffField = noise(
+          wx * 1.18 + organic * 0.12 + 611,
+          wz * 1.18 - organic * 0.12 - 507,
+        );
+        const fineCliffField = noise(wx * 2.45 - 284, wz * 2.45 + 763);
+        const cliffShelves = (
+          smoothstep(-0.08, 0.08, coarseCliffField) * 4.8
+          + smoothstep(0.22, 0.38, fineCliffField) * 2.5
+        ) * (0.3 + wideShoulder * 0.7);
+        const faceDistance = Math.abs(across - spineOffset);
+        const faceBand = smoothstep(0.16, 0.27, faceDistance)
+          * (1 - smoothstep(0.6, 0.76, faceDistance));
+        const faceNoise = noise(wx * 3.75 + 1047, wz * 3.75 - 936) * 0.5 + 0.5;
+        const faceRelief = (smoothstep(0.22, 0.78, faceNoise) - 0.5)
+          * 5.2
+          * faceBand;
+        const mountainBody = massifBase
+          + wideShoulder * 5.2
+          + narrowRidge * 8.2
+          + eastRidge * 12.5
+          + westRidge * 9.5
+          + peakShoulders
+          + peaks
+          + cliffShelves
+          - basins;
         const crags = (ridged - 0.42) * (4.1 + narrowRidge * 3.2) + organic * 1.75;
 
         // A broken band of foothills interrupts the overall descent and makes
@@ -150,6 +431,23 @@ export class MountainGenerator {
           * smoothstep(0.46, 0.76, piedmontNoise)
           * (1.8 + foothillDetail * 3.2)
           * edgeFade;
+        const footScarpLine = -0.24 + noise(nz * 1.35 + 307, 19.2) * 0.09;
+        const scarpPresence = smoothstep(
+          0.48,
+          0.68,
+          noise(nz * 3.2 - 58, nx * 0.8 + 449) * 0.5 + 0.5,
+        );
+        const footScarp = (1 - smoothstep(footScarpLine - 0.018, footScarpLine + 0.025, nx))
+          * smoothstep(-0.72, -0.46, nx)
+          * scarpPresence
+          * (3.5 + foothillDetail * 2.5)
+          * endFade
+          * edgeFade;
+        const foothillGully = Math.exp(
+          -Math.abs(noise(nx * 2.25 + 857, nz * 2.25 - 692)) * 15,
+        ) * foothillBand
+          * smoothstep(1, 4, foothillHeight)
+          * (2.2 + foothillDetail * 2.4);
 
         // The eastern half is a broad plain with seed-dependent low hills.
         const plainLarge = noise(nx * 1.45 + 104, nz * 1.45 - 31) * 0.5 + 0.5;
@@ -178,11 +476,22 @@ export class MountainGenerator {
         const coastalHeight = landToBeach * (1 - seaBlend) + seaDepth * seaBlend;
 
         const mountainHeight = (
-          mountainBody + crags - drainageCut - branchingValleys
-        ) * mountainEnvelope
+          (
+            mountainBody
+            + crags
+            - drainageCut
+            - branchingValleys
+            - crossPasses
+            - fractureValleys
+          ) * mountainEnvelope
+          + (faceKnollHeight + spurHeight - faceHollowDepth + faceRelief) * faceEnvelope
+          + (midlandPeakHeight - midlandValleyDepth) * midlandEnvelope
           + foothillHeight
           + piedmontBase
-          + rollingFoothills;
+          + rollingFoothills
+          + footScarp
+          - foothillGully
+        ) * MASSIF_VERTICAL_SCALE;
         let height = coastalHeight + mountainHeight;
         height = Math.max(WORLD_CONFIG.minHeight, Math.min(WORLD_CONFIG.maxHeight, height));
 
@@ -196,7 +505,7 @@ export class MountainGenerator {
       }
     }
 
-    this.erode(heights, 16);
+    this.erode(heights, 12);
 
     minimum = Number.POSITIVE_INFINITY;
     maximum = Number.NEGATIVE_INFINITY;
@@ -215,7 +524,7 @@ export class MountainGenerator {
   private erode(heights: Float32Array, iterations: number): void {
     const delta = new Float32Array(heights.length);
     const n = this.resolution;
-    const talus = 0.5;
+    const talus = 0.65;
 
     for (let iteration = 0; iteration < iterations; iteration += 1) {
       delta.fill(0);

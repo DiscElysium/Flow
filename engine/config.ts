@@ -1,8 +1,8 @@
 export const WORLD_CONFIG = {
-  size: 144,
+  size: 188,
   segments: 168,
   minHeight: -5,
-  maxHeight: 64,
+  maxHeight: 78,
   seaLevel: -0.18,
   brush: {
     radius: 3.2,
@@ -23,9 +23,9 @@ export const WORLD_CONFIG = {
     fov: 43,
     // 提高近裁面以增加深度缓冲精度，减少水面与地表之间的闪线。
     near: 0.5,
-    far: 520,
-    position: [88, 68, 102] as [number, number, number],
-    target: [-4, 8, 0] as [number, number, number],
+    far: 620,
+    position: [132, 104, 156] as [number, number, number],
+    target: [-8, 8, 0] as [number, number, number],
   },
 } as const;
 

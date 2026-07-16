@@ -583,7 +583,8 @@ export class WaterRenderSystem {
     geometry.setAttribute("waterSourceMix", new THREE.Float32BufferAttribute(buffers.sourceMixes, 1));
     geometry.setAttribute("waterHeightOffset", new THREE.Float32BufferAttribute(buffers.heightOffsets, 1));
     for (const attributeName of ["position", "waterDepth", "waterFlow", "waterSpeed", "waterLake"]) {
-      geometry.getAttribute(attributeName).setUsage(THREE.DynamicDrawUsage);
+      const attribute = geometry.getAttribute(attributeName);
+      if (attribute instanceof THREE.BufferAttribute) attribute.setUsage(THREE.DynamicDrawUsage);
     }
     if (buffers.positions.length > 0) {
       geometry.computeVertexNormals();

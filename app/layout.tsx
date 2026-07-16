@@ -15,9 +15,6 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Alpine Flow Lab — Procedural Low-Poly Terrain",
   description: "一座可生成、可塑形并承载动态水流的低多边形山脉实验场。",
-  other: {
-    "codex-preview": "development",
-  },
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",

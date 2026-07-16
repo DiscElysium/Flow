@@ -69,6 +69,7 @@ export class WaterSimulation {
   private readonly marker = new THREE.Group();
   private renderRefreshElapsed = 0;
   private sourceIndex = 0;
+  private sourceEditing = false;
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -319,14 +320,28 @@ export class WaterSimulation {
     this.marker.position.set(position.x, position.y + 0.62, position.z);
   }
 
+  raycastSource(raycaster: THREE.Raycaster): THREE.Intersection | null {
+    return raycaster.intersectObject(this.marker, true)[0] ?? null;
+  }
+
+  setSourceEditing(editing: boolean): void {
+    this.sourceEditing = editing;
+  }
+
   updateMarker(time: number, active: boolean): void {
     this.renderSystem.update(time);
     const pulse = 1 + Math.sin(time * 0.004) * 0.1;
-    this.marker.scale.setScalar(active ? pulse : 0.88);
+    this.marker.scale.setScalar(this.sourceEditing ? 1.2 + pulse * 0.08 : active ? pulse : 0.88);
     this.marker.rotation.y = time * 0.00035;
     const core = this.marker.getObjectByName("source-core") as THREE.Mesh | undefined;
     if (core && core.material instanceof THREE.MeshStandardMaterial) {
-      core.material.emissiveIntensity = active ? 1.25 + Math.sin(time * 0.006) * 0.25 : 0.32;
+      core.material.emissiveIntensity = this.sourceEditing
+        ? 2 + Math.sin(time * 0.008) * 0.35
+        : active ? 1.25 + Math.sin(time * 0.006) * 0.25 : 0.32;
+    }
+    const halo = this.marker.getObjectByName("source-halo") as THREE.Mesh | undefined;
+    if (halo && halo.material instanceof THREE.MeshBasicMaterial) {
+      halo.material.opacity = this.sourceEditing ? 0.92 : 0.48;
     }
   }
 
@@ -923,9 +938,18 @@ export class WaterSimulation {
       new THREE.RingGeometry(0.48, 0.54, 24),
       new THREE.MeshBasicMaterial({ color: "#8de1df", transparent: true, opacity: 0.48, side: THREE.DoubleSide }),
     );
+    halo.name = "source-halo";
     halo.rotation.x = -Math.PI / 2;
     halo.position.y = -0.36;
     this.marker.add(halo);
+
+    // Make the small crystal forgiving to click without changing its appearance.
+    const hitTarget = new THREE.Mesh(
+      new THREE.SphereGeometry(1.35, 12, 8),
+      new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false, colorWrite: false }),
+    );
+    hitTarget.name = "source-hit-target";
+    this.marker.add(hitTarget);
     this.scene.add(this.marker);
   }
 }

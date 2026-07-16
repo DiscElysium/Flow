@@ -28,6 +28,13 @@ import type { AlpineWorld } from "@/engine/world/AlpineWorld";
 
 const SAVES_KEY = "alpineflowlab:saves";
 const SAVES_DATA_PREFIX = "alpineflowlab:save-data:";
+const FEATURED_SAVE_ID = "featured-map";
+const FEATURED_SAVE_URL = "/maps/featured-map.json";
+
+type FeaturedSave = {
+  data: MapSaveData;
+  meta: SavedMapMeta;
+};
 
 function parseSavesMeta(): SavedMapMeta[] {
   try {
@@ -59,8 +66,40 @@ function loadSaveData(id: string): MapSaveData | null {
   }
 }
 
+function loadLatestSaveData(): MapSaveData | null {
+  const newestFirst = [...parseSavesMeta()].sort((left, right) => right.createdAt - left.createdAt);
+  for (const save of newestFirst) {
+    const data = loadSaveData(save.id);
+    if (data) return data;
+  }
+  return null;
+}
+
 function deleteSaveData(id: string): void {
   localStorage.removeItem(SAVES_DATA_PREFIX + id);
+}
+
+async function loadFeaturedSave(): Promise<FeaturedSave | null> {
+  try {
+    const response = await fetch(FEATURED_SAVE_URL);
+    if (!response.ok) return null;
+    const data = await response.json() as MapSaveData;
+    if (!data.seed || !Array.isArray(data.heights) || data.heights.length === 0) return null;
+    let peakHeight = Number.NEGATIVE_INFINITY;
+    for (const height of data.heights) peakHeight = Math.max(peakHeight, height);
+    return {
+      data,
+      meta: {
+        id: FEATURED_SAVE_ID,
+        name: "NIVAL-385 · 内置展示地图",
+        createdAt: 0,
+        seed: data.seed,
+        peakHeight,
+      },
+    };
+  } catch {
+    return null;
+  }
 }
 
 const seedNames = ["NIVAL", "MORAINE", "CIRQUE", "ARÊTE", "ALPENGLOW", "TALUS"];
@@ -104,15 +143,25 @@ export function AlpineFlowLab() {
   const [irrigationRadius, setIrrigationRadius] = useState(3);
   const [flowDelay, setFlowDelay] = useState(0.1);
   const [showcaseActive, setShowcaseActive] = useState(false);
+  const [placingWaterSource, setPlacingWaterSource] = useState(false);
   const [stats, setStats] = useState<WorldStats>(initialStats);
-  const [saves, setSaves] = useState<SavedMapMeta[]>(parseSavesMeta);
+  // Keep the server HTML and the client's first render identical. Saved maps
+  // are browser-local and can only be loaded after hydration completes.
+  const [saves, setSaves] = useState<SavedMapMeta[]>([]);
+  const [featuredSave, setFeaturedSave] = useState<FeaturedSave | null>(null);
   const [saveName, setSaveName] = useState("");
   const [saveMessage, setSaveMessage] = useState<{ text: string; type: "ok" | "error" } | null>(null);
   const editMode = mode === "edit";
+  const displayedSaves = featuredSave ? [featuredSave.meta, ...saves] : saves;
   const toggleMode = useCallback(() => {
     if (editMode) setTool("orbit");
     setMode(editMode ? "play" : "edit");
   }, [editMode]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => setSaves(parseSavesMeta()));
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -121,16 +170,26 @@ export function AlpineFlowLab() {
     async function mountWorld() {
       if (!hostRef.current) return;
       try {
+        const localSave = loadLatestSaveData();
+        const loadedFeaturedSave = await loadFeaturedSave();
+        if (active) setFeaturedSave(loadedFeaturedSave);
+        const initialSave = localSave ?? loadedFeaturedSave?.data ?? null;
+        const initialSeed = initialSave?.seed ?? seed;
         const worldModule = await import("@/engine/world/AlpineWorld");
         if (!active || !hostRef.current) return;
-        world = new worldModule.AlpineWorld(hostRef.current, seed, {
+        world = new worldModule.AlpineWorld(hostRef.current, initialSeed, {
           onReady: () => {
             if (!active || !world) return;
+            if (initialSave) {
+              world.loadSaveState(initialSave);
+              setSeed(initialSave.seed);
+            }
             worldRef.current = world;
             setStats((current) => ({ ...current, peak: world?.terrain.maxHeight ?? 0 }));
             setReady(true);
           },
           onStats: (nextStats) => active && setStats(nextStats),
+          onWaterSourcePlacementChange: (placing) => active && setPlacingWaterSource(placing),
         });
       } catch (error) {
         console.warn("Alpine Flow Lab requires WebGL.", error);
@@ -231,8 +290,23 @@ export function AlpineFlowLab() {
     showSaveMessage(`已保存「${name}」`);
   }, [saveName, saves, showSaveMessage]);
 
+  const handleExportCurrent = useCallback(() => {
+    const world = worldRef.current;
+    if (!world) return;
+    const blob = new Blob([JSON.stringify(world.getSaveState())], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "alpine-flow-featured-map.json";
+    document.body.append(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+    showSaveMessage("已导出当前地图");
+  }, [showSaveMessage]);
+
   const handleLoad = useCallback((id: string) => {
-    const data = loadSaveData(id);
+    const data = id === FEATURED_SAVE_ID ? featuredSave?.data ?? null : loadSaveData(id);
     if (!data) {
       showSaveMessage("无法加载：数据可能已损坏", "error");
       return;
@@ -246,10 +320,10 @@ export function AlpineFlowLab() {
         waterVolume: worldRef.current?.water.volume ?? 0,
       }));
     }
-    const meta = saves.find((s) => s.id === id);
+    const meta = id === FEATURED_SAVE_ID ? featuredSave?.meta : saves.find((s) => s.id === id);
     showSaveMessage(meta ? `已加载「${meta.name}」` : "已加载地图");
     setShowSaves(false);
-  }, [saves, showSaveMessage]);
+  }, [featuredSave, saves, showSaveMessage]);
 
   const handleDelete = useCallback((id: string) => {
     deleteSaveData(id);
@@ -282,6 +356,12 @@ export function AlpineFlowLab() {
       <div ref={hostRef} className="world-canvas" />
       {renderError && <FallbackMountain />}
       <div className="atmosphere-grain" aria-hidden="true" />
+
+      {placingWaterSource && (
+        <div className="source-placement-tip" role="status">
+          <MapPin size={14} /> 移动鼠标调整水源，再点击地面放置
+        </div>
+      )}
 
       <header className="topbar glass-panel">
         <a className="brand" href="#top" aria-label="Alpine Flow Lab 首页">
@@ -388,7 +468,7 @@ export function AlpineFlowLab() {
               className="save-panel-toggle"
               onClick={() => setShowSaves((v) => !v)}
               disabled={renderError}
-            ><MapPin size={14} /> {saves.length} 份存档</button>
+            ><MapPin size={14} /> {displayedSaves.length} 份存档</button>
           </div>
           <div className="save-row">
             <input
@@ -403,6 +483,9 @@ export function AlpineFlowLab() {
             />
             <button className="save-button" onClick={handleSave} disabled={renderError}>
               <Download size={13} /> 保存
+            </button>
+            <button className="save-button" onClick={handleExportCurrent} disabled={renderError || !ready}>
+              <Upload size={13} /> 导出当前
             </button>
           </div>
           {saveMessage && (
@@ -483,7 +566,7 @@ export function AlpineFlowLab() {
             <ol>
               <li><b>分区地貌</b><span>左侧高山、低丘平原、噪声海岸与海床都由种子生成，五层 ridged noise 雕刻峰面。</span></li>
               <li><b>地形工具</b><span>选择下切、抬升或平滑，直接在山体上拖动；中键始终旋转镜头。</span></li>
-              <li><b>动态融水</b><span>青色晶体是冰川水源。水面依据相邻高度守恒交换，并响应地形改动。</span></li>
+              <li><b>动态融水</b><span>青色晶体是冰川水源；编辑模式下点击晶体，移动鼠标后再次点击即可放置。水面依据相邻高度守恒交换，并响应地形改动。</span></li>
               <li><b>模式切换</b><span>按 M 在编辑与游玩模式之间切换；游玩模式会隐藏全部地形编辑功能。</span></li>
               <li><b>快捷操作</b><span>编辑模式下 O / D / B / S / G / Y 切换工具，Space 开关水流，中键旋转视角。</span></li>
             </ol>
@@ -497,26 +580,34 @@ export function AlpineFlowLab() {
             <button className="notes-close" onClick={() => setShowSaves(false)} aria-label="关闭"><X size={18} /></button>
             <p className="eyebrow"><span>MAP</span> SAVED MAPS</p>
             <h2 id="saves-title">已保存的地图</h2>
-            {saves.length === 0 ? (
+            {displayedSaves.length === 0 ? (
               <p className="saves-empty">还没有保存地图。使用画笔修改地形后，点击「保存」即可创建第一份存档。</p>
             ) : (
               <ul className="saves-list">
-                {saves.map((save) => (
-                  <li key={save.id} className="saves-item">
-                    <div className="saves-item-info">
-                      <strong>{save.name}</strong>
-                      <span>SEED {save.seed} · 主峰 {save.peakHeight.toFixed(1)} km · {new Date(save.createdAt).toLocaleString("zh-CN")}</span>
-                    </div>
-                    <div className="saves-item-actions">
-                      <button className="icon-button saves-load" onClick={() => handleLoad(save.id)} title="加载此存档">
-                        <Upload size={15} />
-                      </button>
-                      <button className="icon-button saves-delete" onClick={() => handleDelete(save.id)} title="删除此存档">
-                        <Trash2 size={15} />
-                      </button>
-                    </div>
-                  </li>
-                ))}
+                {displayedSaves.map((save) => {
+                  const isFeatured = save.id === FEATURED_SAVE_ID;
+                  return (
+                    <li key={save.id} className={`saves-item ${isFeatured ? "is-featured" : ""}`}>
+                      <div className="saves-item-info">
+                        <strong>{save.name}{isFeatured && <small className="saves-badge">网页默认</small>}</strong>
+                        <span>
+                          SEED {save.seed} · 主峰 {save.peakHeight.toFixed(1)} km
+                          {isFeatured ? " · 项目内置存档" : ` · ${new Date(save.createdAt).toLocaleString("zh-CN")}`}
+                        </span>
+                      </div>
+                      <div className="saves-item-actions">
+                        <button className="icon-button saves-load" onClick={() => handleLoad(save.id)} title="加载此存档">
+                          <Upload size={15} />
+                        </button>
+                        {!isFeatured && (
+                          <button className="icon-button saves-delete" onClick={() => handleDelete(save.id)} title="删除此存档">
+                            <Trash2 size={15} />
+                          </button>
+                        )}
+                      </div>
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </section>
