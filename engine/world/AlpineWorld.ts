@@ -7,11 +7,13 @@ import type { MapSaveData, TerrainTool, WorldEventHandlers } from "@/engine/type
 import { ModelManager } from "@/engine/models/ModelManager";
 import { MODELS_CONFIG } from "@/engine/models/presets";
 import { WaterSimulation } from "@/engine/water/WaterSimulation";
+import { OceanSystem } from "@/engine/water/OceanSystem";
 import { WaterShowcaseScene } from "@/engine/water/WaterShowcaseScene";
 
 export class AlpineWorld {
   readonly terrain: TerrainSystem;
   readonly water: WaterSimulation;
+  readonly ocean: OceanSystem;
   readonly scenery: ScenerySystem;
   readonly models: ModelManager;
 
@@ -70,11 +72,12 @@ export class AlpineWorld {
     );
     this.camera.position.fromArray(WORLD_CONFIG.camera.position);
 
-    this.scene.fog = new THREE.FogExp2("#cbd9d4", 0.0125);
+    this.scene.fog = new THREE.FogExp2("#cbd9d4", 0.0078);
     this.createAtmosphere();
     this.createLighting();
     this.waterShowcase = new WaterShowcaseScene();
     this.terrain = new TerrainSystem(this.scene, seed);
+    this.ocean = new OceanSystem(this.scene);
     this.scenery = new ScenerySystem(this.scene, this.terrain, seed);
     this.water = new WaterSimulation(this.scene, this.terrain);
     this.models = new ModelManager(this.scene, this.terrain, MODELS_CONFIG);
@@ -86,8 +89,8 @@ export class AlpineWorld {
     this.controls.target.fromArray(WORLD_CONFIG.camera.target);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.055;
-    this.controls.minDistance = 16;
-    this.controls.maxDistance = 144;
+    this.controls.minDistance = 24;
+    this.controls.maxDistance = 240;
     this.controls.minPolarAngle = 0.18;
     this.controls.maxPolarAngle = Math.PI * 0.475;
     this.controls.enablePan = true;
@@ -252,6 +255,7 @@ export class AlpineWorld {
     this.scenery.dispose();
     this.models.dispose();
     this.water.dispose();
+    this.ocean.dispose();
     this.waterShowcase.dispose();
     this.brushCursor.geometry.dispose();
     this.brushCursor.material.dispose();
@@ -262,15 +266,15 @@ export class AlpineWorld {
   private createLighting(): void {
     this.scene.add(new THREE.HemisphereLight("#e7f0ee", "#55605b", 2.15));
     const sun = new THREE.DirectionalLight("#fff3d6", 4.25);
-    sun.position.set(-22, 36, 18);
+    sun.position.set(-52, 92, 48);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
-    sun.shadow.camera.left = -30;
-    sun.shadow.camera.right = 30;
-    sun.shadow.camera.top = 32;
-    sun.shadow.camera.bottom = -26;
+    sun.shadow.camera.left = -90;
+    sun.shadow.camera.right = 90;
+    sun.shadow.camera.top = 88;
+    sun.shadow.camera.bottom = -88;
     sun.shadow.camera.near = 1;
-    sun.shadow.camera.far = 90;
+    sun.shadow.camera.far = 190;
     // 低多边形大平面容易和自身阴影发生深度竞争，形成整片摩尔纹。
     sun.shadow.bias = -0.0012;
     sun.shadow.normalBias = 0.075;
@@ -284,7 +288,7 @@ export class AlpineWorld {
 
   private createAtmosphere(): void {
     const sky = new THREE.Mesh(
-      new THREE.SphereGeometry(192, 20, 12),
+      new THREE.SphereGeometry(280, 20, 12),
       new THREE.ShaderMaterial({
         side: THREE.BackSide,
         depthWrite: false,
@@ -318,7 +322,7 @@ export class AlpineWorld {
     this.scene.add(sky);
 
     const base = new THREE.Mesh(
-      new THREE.CircleGeometry(164, 48),
+      new THREE.CircleGeometry(238, 48),
       new THREE.MeshStandardMaterial({ color: "#74877d", roughness: 1, flatShading: true }),
     );
     base.rotation.x = -Math.PI / 2;
@@ -456,7 +460,10 @@ export class AlpineWorld {
     this.controls.update();
     if (!this.showcaseActive && this.waterActive) this.water.step(deltaTime, this.flowRate, this.flowDelay);
     if (this.showcaseActive) this.waterShowcase.update(time);
-    else this.water.updateMarker(time, this.waterActive);
+    else {
+      this.ocean.update(time);
+      this.water.updateMarker(time, this.waterActive);
+    }
     if (this.brushCursor.visible) this.brushCursor.position.y += Math.sin(time * 0.005) * 0.0008;
 
     if (time - this.statsTime > 250) {

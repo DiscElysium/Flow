@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { WORLD_CONFIG } from "@/engine/config";
 import { hashSeed, mulberry32, range } from "@/engine/math/random";
 import type { TerrainSystem } from "@/engine/terrain/TerrainSystem";
 
@@ -35,24 +36,50 @@ export class ScenerySystem {
   regenerate(seed: string): void {
     this.clearMeshes();
     const random = mulberry32(hashSeed(`${seed}-scenery`));
-    const half = 43.5;
+    const half = WORLD_CONFIG.size * 0.47;
     const exclusion = 8.6;
     this.trees = [];
     this.rocks = [];
 
-    for (let attempt = 0; attempt < 3200 && this.trees.length < 190; attempt += 1) {
+    for (let attempt = 0; attempt < 6000 && this.trees.length < 360; attempt += 1) {
       const x = range(random, -half, half);
       const z = range(random, -half, half);
       const height = this.terrain.heightAt(x, z);
       const slope = this.terrain.slopeAt(x, z);
-      if (height < 0.3 || height > this.terrain.maxHeight * 0.47 || slope > 0.78) continue;
+      const heightRatio = Math.max(0, height) / this.terrain.maxHeight;
+      if (height < 0.3 || heightRatio > 0.82 || slope > 0.78) continue;
+      if (heightRatio > 0.47) {
+        const alpineProgress = THREE.MathUtils.smoothstep(heightRatio, 0.47, 0.82);
+        const alpineDensity = THREE.MathUtils.lerp(0.2, 0.035, alpineProgress);
+        if (random() > alpineDensity) continue;
+      }
       if (Math.abs(x) < exclusion && Math.abs(z) < exclusion) continue;
-      const scale = range(random, 0.62, 1.32) * (1 - Math.max(0, height) / this.terrain.maxHeight * 0.24);
-      const tint = new THREE.Color("#466457").lerp(new THREE.Color("#6e8068"), random() * 0.42);
+      const scale = range(random, 0.62, 1.32) * (1 - heightRatio * 0.42);
+      const tint = new THREE.Color("#466457")
+        .lerp(new THREE.Color("#788078"), heightRatio * 0.48 + random() * 0.24);
       this.trees.push({ x, z, scale, rotation: random() * Math.PI * 2, color: tint });
     }
 
-    for (let attempt = 0; attempt < 1600 && this.rocks.length < 64; attempt += 1) {
+    const source = this.terrain.indexToWorld(this.terrain.sourceIndex);
+    let alpineTreeCount = this.trees.filter((tree) => (
+      this.terrain.heightAt(tree.x, tree.z) / this.terrain.maxHeight > 0.47
+    )).length;
+    for (let attempt = 0; attempt < 3200 && alpineTreeCount < 6; attempt += 1) {
+      const x = range(random, -half, 0);
+      const z = range(random, -half, half);
+      const height = this.terrain.heightAt(x, z);
+      const heightRatio = height / this.terrain.maxHeight;
+      const slope = this.terrain.slopeAt(x, z);
+      if (heightRatio < 0.5 || heightRatio > 0.78 || slope > 0.68) continue;
+      if (Math.hypot(x - source.x, z - source.z) < 3.2) continue;
+      if (random() > 0.38) continue;
+      const scale = range(random, 0.44, 0.78) * (1 - heightRatio * 0.22);
+      const tint = new THREE.Color("#53665d").lerp(new THREE.Color("#858b84"), random() * 0.5);
+      this.trees.push({ x, z, scale, rotation: random() * Math.PI * 2, color: tint });
+      alpineTreeCount += 1;
+    }
+
+    for (let attempt = 0; attempt < 2800 && this.rocks.length < 108; attempt += 1) {
       const x = range(random, -half, half);
       const z = range(random, -half, half);
       const height = this.terrain.heightAt(x, z);

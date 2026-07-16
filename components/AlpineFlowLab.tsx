@@ -94,7 +94,7 @@ export function AlpineFlowLab() {
   const [showNotes, setShowNotes] = useState(false);
   const [showSaves, setShowSaves] = useState(false);
   const [tool, setTool] = useState<TerrainTool>("orbit");
-  const [brushRadius, setBrushRadius] = useState(2.1);
+  const [brushRadius, setBrushRadius] = useState(3.2);
   const [brushStrength, setBrushStrength] = useState(5.4);
   const [waterActive, setWaterActive] = useState(false);
   const [flowRate, setFlowRate] = useState(1);
@@ -396,7 +396,7 @@ export function AlpineFlowLab() {
         <div className="brush-sliders">
           <label>
             <span>范围 <b>{brushRadius.toFixed(1)}</b></span>
-            <input type="range" min="0.8" max="4.8" step="0.1" value={brushRadius} onChange={(event) => setBrushRadius(Number(event.target.value))} disabled={renderError} />
+            <input type="range" min="1.2" max="8" step="0.1" value={brushRadius} onChange={(event) => setBrushRadius(Number(event.target.value))} disabled={renderError} />
           </label>
           <label>
             <span>力度 <b>{brushStrength.toFixed(1)}</b></span>
@@ -439,7 +439,7 @@ export function AlpineFlowLab() {
             <p className="eyebrow"><span>SYS</span> SYSTEM & CONTROLS</p>
             <h2 id="notes-title">一套可以继续生长的山脉系统</h2>
             <ol>
-              <li><b>山脊骨架</b><span>弯曲主脊线确定山峰走向，五层 ridged noise 雕刻峰面。</span></li>
+              <li><b>分区地貌</b><span>左侧高山、低丘平原、噪声海岸与海床都由种子生成，五层 ridged noise 雕刻峰面。</span></li>
               <li><b>地形工具</b><span>选择下切、抬升或平滑，直接在山体上拖动；中键始终旋转镜头。</span></li>
               <li><b>动态融水</b><span>青色晶体是冰川水源。水面依据相邻高度守恒交换，并响应地形改动。</span></li>
               <li><b>快捷操作</b><span>O / D / B / S 切换工具，Space 开关水流，中键旋转视角，滚轮缩放。</span></li>

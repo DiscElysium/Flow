@@ -1,13 +1,14 @@
 export const WORLD_CONFIG = {
-  size: 92,
+  size: 144,
   segments: 168,
-  minHeight: -2.5,
-  maxHeight: 44,
+  minHeight: -5,
+  maxHeight: 64,
+  seaLevel: -0.18,
   brush: {
-    radius: 4.2,
+    radius: 3.2,
     strength: 5.4,
-    minRadius: 1.6,
-    maxRadius: 9.6,
+    minRadius: 1.2,
+    maxRadius: 8,
   },
   water: {
     sourceRate: 0.8,
@@ -19,9 +20,9 @@ export const WORLD_CONFIG = {
     fov: 43,
     // 提高近裁面以增加深度缓冲精度，减少水面与地表之间的闪线。
     near: 0.5,
-    far: 360,
-    position: [30, 23, 31] as [number, number, number],
-    target: [0, 6.4, 0] as [number, number, number],
+    far: 520,
+    position: [88, 68, 102] as [number, number, number],
+    target: [-4, 8, 0] as [number, number, number],
   },
 } as const;
 
@@ -34,5 +35,8 @@ export const TERRAIN_PALETTE = {
   highRock: "#a5a8a5",
   snowShadow: "#c9d7d8",
   snow: "#eef2ee",
+  sand: "#c9b77e",
+  wetSand: "#9e936f",
+  seabed: "#617b72",
 } as const;
 
