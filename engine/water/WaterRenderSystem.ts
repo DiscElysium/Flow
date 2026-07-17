@@ -33,7 +33,7 @@ type GeometryBuffers = {
   heightOffsets: number[];
 };
 
-const SHORE_ISO_LEVEL = 0.22;
+export const WATER_SHORE_ISO_LEVEL = 0.22;
 const SHORE_SKIRT_DEPTH = 0.075;
 const SHORE_SKIRT_INSET = 0.045;
 const SHORE_SKIRT_TOP_DROP = 0.018;
@@ -209,7 +209,7 @@ export class WaterRenderSystem {
         for (const triangle of terrainTriangles) {
           const contour = this.triangleContourSegment(...triangle);
           if (contour) {
-            const wetSamples = triangle.filter((point) => point.coverage >= SHORE_ISO_LEVEL);
+            const wetSamples = triangle.filter((point) => point.coverage >= WATER_SHORE_ISO_LEVEL);
             const wetCenterX = wetSamples.reduce((sum, point) => sum + point.x, 0) / wetSamples.length;
             const wetCenterZ = wetSamples.reduce((sum, point) => sum + point.z, 0) / wetSamples.length;
             this.appendShoreSkirt(contour[0], contour[1], wetCenterX, wetCenterZ, shoreSkirt);
@@ -258,8 +258,8 @@ export class WaterRenderSystem {
     for (let index = 0; index < input.length; index += 1) {
       const current = input[index];
       const previous = input[(index + input.length - 1) % input.length];
-      const currentInside = current.coverage >= SHORE_ISO_LEVEL;
-      const previousInside = previous.coverage >= SHORE_ISO_LEVEL;
+      const currentInside = current.coverage >= WATER_SHORE_ISO_LEVEL;
+      const previousInside = previous.coverage >= WATER_SHORE_ISO_LEVEL;
       if (currentInside !== previousInside) output.push(this.interpolate(previous, current));
       if (currentInside) output.push(current);
     }
@@ -269,7 +269,7 @@ export class WaterRenderSystem {
   private triangleContourSegment(a: Sample, b: Sample, c: Sample): [Sample, Sample] | null {
     const intersections: Sample[] = [];
     for (const [start, end] of [[a, b], [b, c], [c, a]] as Array<[Sample, Sample]>) {
-      if ((start.coverage >= SHORE_ISO_LEVEL) !== (end.coverage >= SHORE_ISO_LEVEL)) {
+      if ((start.coverage >= WATER_SHORE_ISO_LEVEL) !== (end.coverage >= WATER_SHORE_ISO_LEVEL)) {
         intersections.push(this.interpolate(start, end));
       }
     }
@@ -279,7 +279,7 @@ export class WaterRenderSystem {
   private interpolate(a: Sample, b: Sample): Sample {
     const range = b.coverage - a.coverage;
     const amount = Math.abs(range) > 0.00001
-      ? THREE.MathUtils.clamp((SHORE_ISO_LEVEL - a.coverage) / range, 0, 1)
+      ? THREE.MathUtils.clamp((WATER_SHORE_ISO_LEVEL - a.coverage) / range, 0, 1)
       : 0.5;
     return {
       x: THREE.MathUtils.lerp(a.x, b.x, amount),
@@ -290,7 +290,7 @@ export class WaterRenderSystem {
       sourceMix: amount,
       heightOffset: THREE.MathUtils.lerp(a.heightOffset, b.heightOffset, amount),
       terrainY: THREE.MathUtils.lerp(a.terrainY, b.terrainY, amount),
-      coverage: SHORE_ISO_LEVEL,
+      coverage: WATER_SHORE_ISO_LEVEL,
       depth: THREE.MathUtils.lerp(a.depth, b.depth, amount),
       flowX: THREE.MathUtils.lerp(a.flowX, b.flowX, amount),
       flowZ: THREE.MathUtils.lerp(a.flowZ, b.flowZ, amount),

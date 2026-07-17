@@ -1,6 +1,8 @@
 @import "tailwindcss";
 
 :root {
+  --font-geist-sans: "Segoe UI Variable", "Segoe UI", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-geist-mono: ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   --ink: #1b2925;
   --ink-soft: #46534e;
   --paper: #edf0e8;
@@ -385,6 +387,29 @@ button { color: inherit; }
 .terrain-readout dt { color: #64716c; font-size: 9px; letter-spacing: .06em; }
 .terrain-readout dd { margin: 0; font-family: var(--font-geist-mono), monospace; font-size: 13px; }
 .terrain-readout dd small { color: #71807a; font-size: 7px; }
+
+.performance-grid {
+  margin: -3px 0 12px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.performance-grid span {
+  min-width: 0;
+  padding: 6px 7px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
+  border: 1px solid rgba(35, 58, 48, .08);
+  border-radius: 3px;
+  background: rgba(231, 238, 233, .38);
+  font-family: var(--font-geist-mono), monospace;
+}
+
+.performance-grid small { color: #6d7a74; font-size: 6px; letter-spacing: .06em; }
+.performance-grid b { color: #3f5f52; font-size: 7px; white-space: nowrap; }
 
 .altitude-key {
   display: grid;

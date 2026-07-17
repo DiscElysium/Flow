@@ -25,8 +25,8 @@ type BirdMember = {
 
 type FlightState = {
   direction: 1 | -1;
-  startX: number;
-  endX: number;
+  startZ: number;
+  endZ: number;
   targetX: number;
   targetZ: number;
   baseY: number;
@@ -248,8 +248,8 @@ export class SkyWildlifeSystem {
     this.birdRoot.clear();
     const direction: 1 | -1 = this.random() < 0.5 ? 1 : -1;
     const edge = WORLD_CONFIG.size * 0.5 + 22;
-    const startX = direction > 0 ? -edge : edge;
-    const endX = -startX;
+    const startZ = direction > 0 ? -edge : edge;
+    const endZ = -startZ;
     const speed = range(this.random, 16, 22);
     const birdCount = 8 + Math.floor(this.random() * 5);
     const birds: BirdMember[] = [];
@@ -261,7 +261,7 @@ export class SkyWildlifeSystem {
       const leftWing = new THREE.Mesh(this.leftWingGeometry, this.birdMaterial);
       const rightWing = new THREE.Mesh(this.rightWingGeometry, this.birdMaterial);
       group.add(body, leftWing, rightWing);
-      group.rotation.y = direction < 0 ? Math.PI : 0;
+      group.rotation.y = direction > 0 ? -Math.PI * 0.5 : Math.PI * 0.5;
       group.scale.setScalar(range(this.random, 0.82, 1.18));
       this.birdRoot.add(group);
 
@@ -271,22 +271,22 @@ export class SkyWildlifeSystem {
         group,
         leftWing,
         rightWing,
-        offsetX: -direction * rank * range(this.random, 1.45, 1.85),
+        offsetX: formationSide * rank * range(this.random, 1.05, 1.38),
         offsetY: index === 0 ? 0 : range(this.random, -0.35, 0.7),
-        offsetZ: formationSide * rank * range(this.random, 1.05, 1.38),
+        offsetZ: -direction * rank * range(this.random, 1.45, 1.85),
         phase: range(this.random, 0, Math.PI * 2),
       });
     }
 
     this.flight = {
       direction,
-      startX,
-      endX,
+      startZ,
+      endZ,
       targetX: target.x,
       targetZ: target.z,
       baseY: Math.max(24, target.y + range(this.random, 15, 22)),
       elapsed: 0,
-      duration: Math.abs(endX - startX) / speed,
+      duration: Math.abs(endZ - startZ) / speed,
       birds,
     };
   }
@@ -303,9 +303,9 @@ export class SkyWildlifeSystem {
     }
 
     const clampedProgress = THREE.MathUtils.clamp(progress, 0, 1);
-    const leaderX = THREE.MathUtils.lerp(flight.startX, flight.endX, clampedProgress);
-    const targetProgress = (flight.targetX - flight.startX) / (flight.endX - flight.startX);
-    const leaderZ = flight.targetZ
+    const leaderZ = THREE.MathUtils.lerp(flight.startZ, flight.endZ, clampedProgress);
+    const targetProgress = (flight.targetZ - flight.startZ) / (flight.endZ - flight.startZ);
+    const leaderX = flight.targetX
       + Math.sin((clampedProgress - targetProgress) * Math.PI * 2) * 0.9;
     const leaderY = flight.baseY + Math.sin(clampedProgress * Math.PI) * 4;
 
