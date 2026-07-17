@@ -72,7 +72,7 @@ export class AlpineWorld {
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.12;
-    this.renderer.domElement.setAttribute("aria-label", "可交互的低多边形山脉场景");
+    this.renderer.domElement.setAttribute("aria-label", "Interactive low-poly mountain scene");
     this.container.appendChild(this.renderer.domElement);
 
     this.camera = new THREE.PerspectiveCamera(
@@ -125,7 +125,7 @@ export class AlpineWorld {
   }
 
   setTool(tool: TerrainTool): void {
-    this.tool = this.editMode ? tool : "orbit";
+    this.tool = !this.editMode && this.isEditOnlyTool(tool) ? "orbit" : tool;
     this.brushCursor.visible = false;
     this.syncControlMode();
   }
@@ -134,7 +134,7 @@ export class AlpineWorld {
     this.editMode = enabled;
     if (!enabled) {
       this.finishSourcePlacement();
-      this.setTool("orbit");
+      if (this.isEditOnlyTool(this.tool)) this.setTool("orbit");
     }
   }
 
@@ -145,6 +145,7 @@ export class AlpineWorld {
   }
 
   setBrushStrength(strength: number): void {
+    if (!this.editMode) return;
     this.brushStrength = THREE.MathUtils.clamp(strength, 1, 10);
   }
 
@@ -167,6 +168,7 @@ export class AlpineWorld {
   }
 
   setFlowDelay(seconds: number): void {
+    if (!this.editMode) return;
     this.flowDelay = THREE.MathUtils.clamp(seconds, 0.02, 0.5);
   }
 
@@ -245,6 +247,9 @@ export class AlpineWorld {
       maxHeight: this.terrain.maxHeight,
       seed: this.currentSeed,
       groundPaint: this.terrain.getGroundPaintState(),
+      rockPaint: this.terrain.getRockPaintState(),
+      rockGroups: this.terrain.getRockGroupState(),
+      rockHeightsIntegrated: true,
       modelInstances: this.models.getInstanceData(),
     };
   }
@@ -262,6 +267,7 @@ export class AlpineWorld {
     // 所以这里直接用 TerrainSystem 的 rebuildGeometry 对应的方案：直接替换 + 重建
     this.terrain["rebuildGeometry"]();
     this.terrain.loadGroundPaintState(data.groundPaint);
+    this.terrain.loadRockPaintState(data.rockPaint, data.rockGroups, data.rockHeightsIntegrated);
     this.scenery.refreshHeights();
     this.skyWildlife.regenerate(data.seed);
     // 恢复外部模型（terrain 重建后高度已就绪）
@@ -410,6 +416,7 @@ export class AlpineWorld {
       smooth: "#78aab0",
       "paint-green": "#4f8172",
       "paint-yellow": "#d6bd61",
+      "paint-rock": "#68706c",
     };
     this.brushCursor.material.color.set(colors[this.tool]);
     this.renderer.domElement.dataset.tool = this.showcaseActive ? "orbit" : this.tool;
@@ -422,11 +429,11 @@ export class AlpineWorld {
     this.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     this.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
     this.raycaster.setFromCamera(this.pointer, this.camera);
-    const intersection = this.raycaster.intersectObject(this.terrain.mesh, false)[0] ?? null;
+    const intersection = this.raycaster.intersectObjects([this.terrain.rockMesh, this.terrain.mesh], false)[0] ?? null;
     if (intersection) {
       this.cursorPoint = intersection.point.clone();
       this.hoverElevation = intersection.point.y;
-      if (this.editMode && this.tool !== "orbit" && !this.sourcePlacementActive) {
+      if (this.tool !== "orbit" && !this.sourcePlacementActive && (this.editMode || !this.isEditOnlyTool(this.tool))) {
         this.brushCursor.position.copy(intersection.point);
         this.brushCursor.position.y += 0.09;
         this.brushCursor.visible = true;
@@ -471,6 +478,7 @@ export class AlpineWorld {
       this.brushRadius,
       this.brushStrength,
       deltaTime,
+      !this.editMode,
     );
     if (changed) {
       this.editedInStroke = true;
@@ -489,10 +497,10 @@ export class AlpineWorld {
       event.stopPropagation();
       return;
     }
-    if (event.button !== 0 || !this.editMode || this.showcaseActive) return;
+    if (event.button !== 0 || this.showcaseActive || (!this.editMode && this.isEditOnlyTool(this.tool))) return;
     const hit = this.updatePointer(event);
 
-    if (this.sourcePlacementActive) {
+    if (this.editMode && this.sourcePlacementActive) {
       event.preventDefault();
       event.stopImmediatePropagation();
       if (!hit) return;
@@ -501,12 +509,14 @@ export class AlpineWorld {
       return;
     }
 
-    const sourceHit = this.water.raycastSource(this.raycaster);
-    if (sourceHit && (!hit || sourceHit.distance <= hit.distance + 0.2)) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      this.beginSourcePlacement();
-      return;
+    if (this.editMode) {
+      const sourceHit = this.water.raycastSource(this.raycaster);
+      if (sourceHit && (!hit || sourceHit.distance <= hit.distance + 0.2)) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        this.beginSourcePlacement();
+        return;
+      }
     }
 
     if (this.tool === "orbit") return;
@@ -514,6 +524,7 @@ export class AlpineWorld {
     event.preventDefault();
     this.editing = true;
     this.editedInStroke = false;
+    this.terrain.beginStroke(this.tool);
     this.lastEditTime = performance.now() - 32;
     this.renderer.domElement.setPointerCapture?.(event.pointerId);
     this.applyCurrentBrush(performance.now());
@@ -528,8 +539,16 @@ export class AlpineWorld {
   private onPointerUp = (): void => {
     if (!this.editing) return;
     this.editing = false;
+    this.terrain.finishStroke();
     if (this.editedInStroke) {
-      if (!this.isPaintTool()) {
+      if (this.isPaintTool()) {
+        this.scenery.updateTreeWatering((x, z) => this.terrain.isGreenAt(x, z));
+        if (this.tool === "paint-rock") {
+          this.scenery.refreshHeights();
+          this.models.refreshHeights();
+          this.water.syncTerrain(true);
+        }
+      } else {
         this.scenery.refreshHeights();
         this.models.refreshHeights();
       }
@@ -625,6 +644,10 @@ export class AlpineWorld {
   }
 
   private isPaintTool(): boolean {
-    return this.tool === "paint-green" || this.tool === "paint-yellow";
+    return this.isEditOnlyTool(this.tool);
+  }
+
+  private isEditOnlyTool(tool: TerrainTool): boolean {
+    return tool === "paint-green" || tool === "paint-yellow" || tool === "paint-rock";
   }
 }

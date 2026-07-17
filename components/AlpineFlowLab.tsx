@@ -3,13 +3,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Blend,
+  BookOpen,
   Check,
   Download,
   Droplets,
   Eraser,
   Focus,
   Hand,
-  Info,
   MapPin,
   Mountain,
   Pickaxe,
@@ -91,7 +91,7 @@ async function loadFeaturedSave(): Promise<FeaturedSave | null> {
       data,
       meta: {
         id: FEATURED_SAVE_ID,
-        name: "NIVAL-385 · 内置展示地图",
+        name: "NIVAL-385 · Featured Map",
         createdAt: 0,
         seed: data.seed,
         peakHeight,
@@ -112,13 +112,16 @@ const toolOptions: Array<{
   shortcut: string;
   icon: typeof Hand;
 }> = [
-  { id: "orbit", label: "观察", hint: "旋转镜头", shortcut: "O", icon: Hand },
-  { id: "carve", label: "下切", hint: "雕刻谷地", shortcut: "D", icon: Pickaxe },
-  { id: "raise", label: "抬升", hint: "堆起山体", shortcut: "B", icon: TrendingUp },
-  { id: "smooth", label: "平滑", hint: "修整坡面", shortcut: "S", icon: Blend },
-  { id: "paint-green", label: "青化", hint: "永久刷成青绿色地面", shortcut: "G", icon: Droplets },
-  { id: "paint-yellow", label: "黄化", hint: "刷回会响应水流的黄色地面", shortcut: "Y", icon: Eraser },
+  { id: "orbit", label: "Orbit", hint: "Rotate the camera", shortcut: "O", icon: Hand },
+  { id: "carve", label: "Carve", hint: "Cut a channel", shortcut: "D", icon: Pickaxe },
+  { id: "raise", label: "Raise", hint: "Build up terrain", shortcut: "B", icon: TrendingUp },
+  { id: "smooth", label: "Smooth", hint: "Soften the slope", shortcut: "S", icon: Blend },
+  { id: "paint-green", label: "Green", hint: "Paint permanent cyan-green ground", shortcut: "G", icon: Droplets },
+  { id: "paint-yellow", label: "Yellow", hint: "Restore water-responsive yellow ground", shortcut: "Y", icon: Eraser },
+  { id: "paint-rock", label: "Stone", hint: "Turn each stroke into one low-poly boulder", shortcut: "R", icon: Mountain },
 ];
+
+const editOnlyTools = new Set<TerrainTool>(["paint-green", "paint-yellow", "paint-rock"]);
 
 function createSeed(): string {
   const name = seedNames[Math.floor(Math.random() * seedNames.length)];
@@ -132,7 +135,7 @@ export function AlpineFlowLab() {
   const [seed, setSeed] = useState("NIVAL-042");
   const [ready, setReady] = useState(false);
   const [renderError, setRenderError] = useState(false);
-  const [showNotes, setShowNotes] = useState(false);
+  const [showTutorial, setShowTutorial] = useState(false);
   const [showSaves, setShowSaves] = useState(false);
   const [mode, setMode] = useState<"edit" | "play">("edit");
   const [tool, setTool] = useState<TerrainTool>("orbit");
@@ -252,8 +255,10 @@ export function AlpineFlowLab() {
         s: "smooth",
         g: "paint-green",
         y: "paint-yellow",
+        r: "paint-rock",
       };
-      const nextTool = editMode ? shortcuts[key] : undefined;
+      const requestedTool = shortcuts[key];
+      const nextTool = requestedTool && (editMode || !editOnlyTools.has(requestedTool)) ? requestedTool : undefined;
       if (nextTool) setTool(nextTool);
       if (event.code === "Space") {
         event.preventDefault();
@@ -274,7 +279,7 @@ export function AlpineFlowLab() {
     if (!world) return;
     const data = world.getSaveState();
     const id = `map_${Date.now()}`;
-    const name = saveName.trim() || `地图 ${new Date().toLocaleString("zh-CN", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`;
+    const name = saveName.trim() || `Map ${new Date().toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`;
     const meta: SavedMapMeta = {
       id,
       name,
@@ -287,7 +292,7 @@ export function AlpineFlowLab() {
     persistSavesMeta(next);
     setSaves(next);
     setSaveName("");
-    showSaveMessage(`已保存「${name}」`);
+    showSaveMessage(`Saved “${name}”`);
   }, [saveName, saves, showSaveMessage]);
 
   const handleExportCurrent = useCallback(() => {
@@ -302,13 +307,13 @@ export function AlpineFlowLab() {
     link.click();
     link.remove();
     window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
-    showSaveMessage("已导出当前地图");
+    showSaveMessage("Current map exported");
   }, [showSaveMessage]);
 
   const handleLoad = useCallback((id: string) => {
     const data = id === FEATURED_SAVE_ID ? featuredSave?.data ?? null : loadSaveData(id);
     if (!data) {
-      showSaveMessage("无法加载：数据可能已损坏", "error");
+      showSaveMessage("Could not load: the map data may be damaged", "error");
       return;
     }
     worldRef.current?.loadSaveState(data);
@@ -321,7 +326,7 @@ export function AlpineFlowLab() {
       }));
     }
     const meta = id === FEATURED_SAVE_ID ? featuredSave?.meta : saves.find((s) => s.id === id);
-    showSaveMessage(meta ? `已加载「${meta.name}」` : "已加载地图");
+    showSaveMessage(meta ? `Loaded “${meta.name}”` : "Map loaded");
     setShowSaves(false);
   }, [featuredSave, saves, showSaveMessage]);
 
@@ -359,12 +364,12 @@ export function AlpineFlowLab() {
 
       {placingWaterSource && (
         <div className="source-placement-tip" role="status">
-          <MapPin size={14} /> 移动鼠标调整水源，再点击地面放置
+          <MapPin size={14} /> Move the pointer to position the source, then click the ground to place it
         </div>
       )}
 
       <header className="topbar glass-panel">
-        <a className="brand" href="#top" aria-label="Alpine Flow Lab 首页">
+        <a className="brand" href="#top" aria-label="Alpine Flow Lab home">
           <span className="brand-mark"><Mountain size={17} strokeWidth={1.8} /></span>
           <span>
             <strong>ALPINE / FLOW</strong>
@@ -376,10 +381,10 @@ export function AlpineFlowLab() {
             <button
               className={`mode-toggle ${editMode ? "is-edit" : "is-play"}`}
               onClick={toggleMode}
-              aria-label={`切换到${editMode ? "游玩" : "编辑"}模式`}
-              title="按 M 切换模式"
+              aria-label={`Switch to ${editMode ? "play" : "edit"} mode`}
+              title="Press M to switch modes"
             >
-              <i />{editMode ? "编辑模式" : "游玩模式"}<small>M</small>
+              <i />{editMode ? "EDIT MODE" : "PLAY MODE"}<small>M</small>
             </button>
           )}
           <span className="seed-chip"><i />{showcaseActive ? "WATER TEST RANGE" : <>SEED&nbsp; {seed}</>}</span>
@@ -389,42 +394,42 @@ export function AlpineFlowLab() {
             aria-pressed={showcaseActive}
           >
             <Waves size={15} />
-            <span>{showcaseActive ? "返回模拟场景" : "水体测试场"}</span>
+            <span>{showcaseActive ? "BACK TO SIMULATION" : "WATER SHOWCASE"}</span>
           </button>
-          <button className="icon-button" onClick={() => worldRef.current?.focusHome()} aria-label="返回最佳视角" title="返回最佳视角">
+          <button className="icon-button" onClick={() => worldRef.current?.focusHome()} aria-label="Return to the best view" title="Reset view">
             <Focus size={17} />
           </button>
-          <button className="icon-button" onClick={() => setShowNotes(true)} aria-label="查看操作说明" title="操作说明">
-            <Info size={17} />
+          <button className="icon-button" onClick={() => setShowTutorial(true)} aria-label="Open play tutorial" title="Play tutorial">
+            <BookOpen size={17} />
           </button>
         </div>
       </header>
 
       {editMode && !showcaseActive && (
-        <button className="regenerate-fab" onClick={regenerate} disabled={renderError} aria-label="重新生成山脉" title="重新生成">
+        <button className="regenerate-fab" onClick={regenerate} disabled={renderError} aria-label="Generate a new mountain" title="Generate new mountain">
           <RefreshCw size={18} />
         </button>
       )}
 
-      {!showcaseActive && <aside className="terrain-readout glass-panel" aria-label="地形与水流数据">
+      {!showcaseActive && <aside className="terrain-readout glass-panel" aria-label="Terrain and water data">
         <div className="readout-heading">
           <span><Sparkles size={15} /> LIVE PROFILE</span>
           <b>{stats.fps} FPS</b>
         </div>
         <dl>
-          <div><dt>主峰高度</dt><dd>{stats.peak.toFixed(1)}<small> km*</small></dd></div>
-          <div><dt>指针海拔</dt><dd>{stats.elevation.toFixed(1)}<small> km*</small></dd></div>
-          <div><dt>地表水量</dt><dd>{stats.waterVolume.toFixed(1)}<small> m³*</small></dd></div>
-          <div><dt>黄色地面水染率</dt><dd>{stats.wateredYellowPercent.toFixed(1)}<small> %</small></dd></div>
+          <div><dt>PEAK HEIGHT</dt><dd>{stats.peak.toFixed(1)}<small> km*</small></dd></div>
+          <div><dt>CURSOR ELEVATION</dt><dd>{stats.elevation.toFixed(1)}<small> km*</small></dd></div>
+          <div><dt>SURFACE WATER</dt><dd>{stats.waterVolume.toFixed(1)}<small> m³*</small></dd></div>
+          <div><dt>WATERED YELLOW GROUND</dt><dd>{stats.wateredYellowPercent.toFixed(1)}<small> %</small></dd></div>
         </dl>
-        <div className="altitude-key" aria-label="高度着色图例">
-          <span className="key-snow">雪线</span>
-          <span className="key-rock">裸岩</span>
-          <span className="key-pine">林线</span>
-          <span className="key-valley">谷地</span>
+        <div className="altitude-key" aria-label="Elevation color key">
+          <span className="key-snow">SNOW LINE</span>
+          <span className="key-rock">BARE ROCK</span>
+          <span className="key-pine">TREE LINE</span>
+          <span className="key-valley">VALLEY</span>
         </div>
 
-        <section className="flow-controls" aria-label="融水控制">
+        <section className="flow-controls" aria-label="Meltwater controls">
           <div className="flow-title">
             <span><Droplets size={14} /> GLACIER MELT</span>
             <button
@@ -436,31 +441,33 @@ export function AlpineFlowLab() {
             ><i /></button>
           </div>
           <label>
-            <span>流量 <b>{flowRate.toFixed(1)}×</b></span>
+            <span>FLOW RATE <b>{flowRate.toFixed(1)}×</b></span>
             <input type="range" min="0.2" max="10" step="0.1" value={flowRate} onChange={(event) => setFlowRate(Number(event.target.value))} disabled={renderError} />
           </label>
           {editMode && (
             <label>
-              <span>润泽范围 <b>{irrigationRadius.toFixed(1)}</b></span>
+              <span>WATERING RANGE <b>{irrigationRadius.toFixed(1)}</b></span>
               <input type="range" min="0.5" max="8" step="0.1" value={irrigationRadius} onChange={(event) => setIrrigationRadius(Number(event.target.value))} disabled={renderError} />
             </label>
           )}
-          <label>
-            <span>流速 <b>{flowDelay.toFixed(2)} 秒/格</b></span>
-            <input
-              type="range"
-              min="0.02"
-              max="0.5"
-              step="0.01"
-              value={flowDelay}
-              onChange={(event) => setFlowDelay(Number(event.target.value))}
-              disabled={renderError}
-              aria-label="水流每格停留时间"
-            />
-          </label>
+          {editMode && (
+            <label>
+              <span>FLOW SPEED <b>{flowDelay.toFixed(2)} s/cell</b></span>
+              <input
+                type="range"
+                min="0.02"
+                max="0.5"
+                step="0.01"
+                value={flowDelay}
+                onChange={(event) => setFlowDelay(Number(event.target.value))}
+                disabled={renderError}
+                aria-label="Water dwell time per cell"
+              />
+            </label>
+          )}
           <div className={`panel-actions ${editMode ? "" : "single"}`}>
-            <button onClick={clearWater} disabled={renderError}><Eraser size={13} /> 清空水体</button>
-            {editMode && <button onClick={resetTerrain} disabled={renderError}><Undo2 size={13} /> 还原地形</button>}
+            <button onClick={clearWater} disabled={renderError}><Eraser size={13} /> CLEAR WATER</button>
+            {editMode && <button onClick={resetTerrain} disabled={renderError}><Undo2 size={13} /> RESTORE TERRAIN</button>}
           </div>
           <div className="flow-title save-title">
             <span><Save size={14} /> MAP SAVE</span>
@@ -468,13 +475,13 @@ export function AlpineFlowLab() {
               className="save-panel-toggle"
               onClick={() => setShowSaves((v) => !v)}
               disabled={renderError}
-            ><MapPin size={14} /> {displayedSaves.length} 份存档</button>
+            ><MapPin size={14} /> {displayedSaves.length} {displayedSaves.length === 1 ? "SAVE" : "SAVES"}</button>
           </div>
           <div className="save-row">
             <input
               className="save-name-input"
               type="text"
-              placeholder="存档名称（可选）"
+              placeholder="Save name (optional)"
               value={saveName}
               onChange={(e) => setSaveName(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
@@ -482,10 +489,10 @@ export function AlpineFlowLab() {
               maxLength={30}
             />
             <button className="save-button" onClick={handleSave} disabled={renderError}>
-              <Download size={13} /> 保存
+              <Download size={13} /> SAVE
             </button>
             <button className="save-button" onClick={handleExportCurrent} disabled={renderError || !ready}>
-              <Upload size={13} /> 导出当前
+              <Upload size={13} /> EXPORT CURRENT
             </button>
           </div>
           {saveMessage && (
@@ -495,12 +502,12 @@ export function AlpineFlowLab() {
             </p>
           )}
         </section>
-        <p className="scale-note">* 艺术化模拟单位，用于比较相对变化</p>
+        <p className="scale-note">* Stylized simulation units for comparing relative change</p>
       </aside>}
 
-      {editMode && !showcaseActive && <nav className="tool-dock glass-panel" aria-label="地形工具">
+      {!showcaseActive && <nav className={`tool-dock glass-panel ${editMode ? "" : "is-play"}`} aria-label="Terrain tools">
         <div className="tool-group">
-          {toolOptions.map((option) => {
+          {toolOptions.filter((option) => editMode || !editOnlyTools.has(option.id)).map((option) => {
             const Icon = option.icon;
             return (
               <button
@@ -517,19 +524,21 @@ export function AlpineFlowLab() {
             );
           })}
         </div>
-        <div className="dock-divider" />
-        <div className="brush-sliders">
-          <label>
-            <span>范围 <b>{brushRadius.toFixed(1)}</b></span>
-            <input type="range" min="1.2" max="8" step="0.1" value={brushRadius} onChange={(event) => setBrushRadius(Number(event.target.value))} disabled={renderError} />
-          </label>
-          <label>
-            <span>力度 <b>{brushStrength.toFixed(1)}</b></span>
-            <input type="range" min="1" max="10" step="0.2" value={brushStrength} onChange={(event) => setBrushStrength(Number(event.target.value))} disabled={renderError} />
-          </label>
-        </div>
-        <button className={`water-quick ${waterActive ? "is-on" : ""}`} onClick={() => setWaterActive((active) => !active)} disabled={renderError} aria-label={waterActive ? "暂停水流" : "开启水流"}>
-          <Waves size={17} /><span>{waterActive ? "水流中" : "开启水流"}<small>SPACE</small></span>
+        {editMode && <div className="dock-divider" />}
+        {editMode && (
+          <div className="brush-sliders">
+            <label>
+              <span>SIZE <b>{brushRadius.toFixed(1)}</b></span>
+              <input type="range" min="1.2" max="8" step="0.1" value={brushRadius} onChange={(event) => setBrushRadius(Number(event.target.value))} disabled={renderError} />
+            </label>
+            <label>
+              <span>STRENGTH <b>{brushStrength.toFixed(1)}</b></span>
+              <input type="range" min="1" max="10" step="0.2" value={brushStrength} onChange={(event) => setBrushStrength(Number(event.target.value))} disabled={renderError} />
+            </label>
+          </div>
+        )}
+        <button className={`water-quick ${waterActive ? "is-on" : ""}`} onClick={() => setWaterActive((active) => !active)} disabled={renderError} aria-label={waterActive ? "Pause water flow" : "Start water flow"}>
+          <Waves size={17} /><span>{waterActive ? "FLOWING" : "START FLOW"}<small>SPACE</small></span>
         </button>
       </nav>}
 
@@ -538,37 +547,39 @@ export function AlpineFlowLab() {
       </div>}
 
       {showcaseActive && (
-        <section className="showcase-guide glass-panel" aria-label="水体测试场图例">
-          <div><b>01 河流</b><span>细曲线浪脊沿流向伸展</span></div>
-          <div><b>02 湖泊</b><span>有体积的方向波与局部小浪</span></div>
-          <div><b>03 瀑布</b><span>窄水纹、水幕与落点白沫</span></div>
+        <section className="showcase-guide glass-panel" aria-label="Water showcase key">
+          <div><b>01 RIVER</b><span>Fine curved wave ridges stretch with the current</span></div>
+          <div><b>02 LAKE</b><span>Directional body waves with localized ripples</span></div>
+          <div><b>03 WATERFALL</b><span>Narrow water lines, falling sheets, and impact foam</span></div>
         </section>
       )}
 
       {!ready && (
         <div className="loading-screen">
           <div className="loading-mark"><Mountain size={24} /></div>
-          <p>正在抬升山脊</p>
+          <p>RAISING THE RIDGELINE</p>
           <span />
         </div>
       )}
 
       {renderError && (
-        <p className="render-warning">当前预览环境未启用 WebGL；请在支持 WebGL 的现代浏览器中打开以体验交互山体。</p>
+        <p className="render-warning">WebGL is unavailable in this preview. Open the project in a modern WebGL-enabled browser to explore the interactive mountain.</p>
       )}
 
-      {showNotes && (
-        <div className="notes-backdrop" role="presentation" onMouseDown={() => setShowNotes(false)}>
-          <section className="notes-panel" role="dialog" aria-modal="true" aria-labelledby="notes-title" onMouseDown={(event) => event.stopPropagation()}>
-            <button className="notes-close" onClick={() => setShowNotes(false)} aria-label="关闭"><X size={18} /></button>
-            <p className="eyebrow"><span>SYS</span> SYSTEM & CONTROLS</p>
-            <h2 id="notes-title">一套可以继续生长的山脉系统</h2>
+      {showTutorial && (
+        <div className="notes-backdrop" role="presentation" onMouseDown={() => setShowTutorial(false)}>
+          <section className="notes-panel tutorial-panel" role="dialog" aria-modal="true" aria-labelledby="tutorial-title" onMouseDown={(event) => event.stopPropagation()}>
+            <button className="notes-close" onClick={() => setShowTutorial(false)} aria-label="Close tutorial"><X size={18} /></button>
+            <p className="eyebrow"><span>PLAY</span> QUICK TUTORIAL</p>
+            <h2 id="tutorial-title">Follow the water</h2>
+            <p className="tutorial-intro">The essential controls for exploring the mountain in Play Mode.</p>
             <ol>
-              <li><b>分区地貌</b><span>左侧高山、低丘平原、噪声海岸与海床都由种子生成，五层 ridged noise 雕刻峰面。</span></li>
-              <li><b>地形工具</b><span>选择下切、抬升或平滑，直接在山体上拖动；中键始终旋转镜头。</span></li>
-              <li><b>动态融水</b><span>青色晶体是冰川水源；编辑模式下点击晶体，移动鼠标后再次点击即可放置。水面依据相邻高度守恒交换，并响应地形改动。</span></li>
-              <li><b>模式切换</b><span>按 M 在编辑与游玩模式之间切换；游玩模式会隐藏全部地形编辑功能。</span></li>
-              <li><b>快捷操作</b><span>编辑模式下 O / D / B / S / G / Y 切换工具，Space 开关水流，中键旋转视角。</span></li>
+              <li><b>ROTATE VIEW</b><span><kbd>MIDDLE MOUSE</kbd> + drag to orbit around the mountain.</span></li>
+              <li><b>MOVE VIEW</b><span>Hold <kbd>SHIFT</kbd> + <kbd>MIDDLE MOUSE</kbd>, then drag to move the view sideways or vertically.</span></li>
+              <li><b>ZOOM</b><span>Use the <kbd>MOUSE WHEEL</kbd> to move closer to or farther from the landscape.</span></li>
+              <li><b>SHAPE FLOW</b><span>Choose <kbd>D</kbd> Carve, <kbd>B</kbd> Raise, or <kbd>S</kbd> Smooth, then drag with the left mouse button across the terrain.</span></li>
+              <li><b>RUN WATER</b><span>Press <kbd>SPACE</kbd> to start or pause the meltwater. Use Flow Rate to change how much water enters the landscape.</span></li>
+              <li><b>RESET VIEW</b><span>Select the focus button in the top bar whenever you want to return to the recommended viewpoint.</span></li>
             </ol>
           </section>
         </div>
@@ -577,11 +588,11 @@ export function AlpineFlowLab() {
       {showSaves && (
         <div className="notes-backdrop" role="presentation" onMouseDown={() => setShowSaves(false)}>
           <section className="saves-panel notes-panel" role="dialog" aria-modal="true" aria-labelledby="saves-title" onMouseDown={(event) => event.stopPropagation()}>
-            <button className="notes-close" onClick={() => setShowSaves(false)} aria-label="关闭"><X size={18} /></button>
+            <button className="notes-close" onClick={() => setShowSaves(false)} aria-label="Close saved maps"><X size={18} /></button>
             <p className="eyebrow"><span>MAP</span> SAVED MAPS</p>
-            <h2 id="saves-title">已保存的地图</h2>
+            <h2 id="saves-title">Saved maps</h2>
             {displayedSaves.length === 0 ? (
-              <p className="saves-empty">还没有保存地图。使用画笔修改地形后，点击「保存」即可创建第一份存档。</p>
+              <p className="saves-empty">No maps have been saved yet. Shape the terrain, then select Save to create your first one.</p>
             ) : (
               <ul className="saves-list">
                 {displayedSaves.map((save) => {
@@ -589,18 +600,18 @@ export function AlpineFlowLab() {
                   return (
                     <li key={save.id} className={`saves-item ${isFeatured ? "is-featured" : ""}`}>
                       <div className="saves-item-info">
-                        <strong>{save.name}{isFeatured && <small className="saves-badge">网页默认</small>}</strong>
+                        <strong>{save.name}{isFeatured && <small className="saves-badge">DEFAULT</small>}</strong>
                         <span>
-                          SEED {save.seed} · 主峰 {save.peakHeight.toFixed(1)} km
-                          {isFeatured ? " · 项目内置存档" : ` · ${new Date(save.createdAt).toLocaleString("zh-CN")}`}
+                          SEED {save.seed} · PEAK {save.peakHeight.toFixed(1)} km
+                          {isFeatured ? " · BUILT-IN MAP" : ` · ${new Date(save.createdAt).toLocaleString("en-US")}`}
                         </span>
                       </div>
                       <div className="saves-item-actions">
-                        <button className="icon-button saves-load" onClick={() => handleLoad(save.id)} title="加载此存档">
+                        <button className="icon-button saves-load" onClick={() => handleLoad(save.id)} title="Load this map">
                           <Upload size={15} />
                         </button>
                         {!isFeatured && (
-                          <button className="icon-button saves-delete" onClick={() => handleDelete(save.id)} title="删除此存档">
+                          <button className="icon-button saves-delete" onClick={() => handleDelete(save.id)} title="Delete this map">
                             <Trash2 size={15} />
                           </button>
                         )}

@@ -488,6 +488,9 @@ export class WaterSimulation {
 
   private getFlowTerrainHeight(index: number): number {
     const height = this.terrain.heights[index];
+    // A painted stone is intentional macro geometry, not a one-cell terrain
+    // bump. Preserve its exact rendered surface in the hydraulic calculation.
+    if (this.terrain.isRockIndex(index)) return height;
     const x = index % this.resolution;
     const z = Math.floor(index / this.resolution);
     const bridgeHeights: number[] = [];
@@ -840,7 +843,7 @@ export class WaterSimulation {
     for (let i = 0; i < this.depth.length; i += 1) {
       const targetSurfaceHeight = this.terrain.heights[i]
         + Math.max(MIN_VISUAL_WATER_DEPTH, this.depth[i])
-        + WATER_RENDER_OFFSET;
+        + (this.terrain.isRockIndex(i) ? WATER_RENDER_OFFSET + 0.04 : WATER_RENDER_OFFSET);
       if (this.visualSurfaceHeight[i] === 0 || this.depth[i] <= VISUAL_EDGE_DEPTH) {
         this.visualSurfaceHeight[i] = targetSurfaceHeight;
       } else {

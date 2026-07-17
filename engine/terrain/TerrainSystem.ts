@@ -5,11 +5,14 @@ import { MountainGenerator } from "@/engine/terrain/MountainGenerator";
 import type { MountainData, TerrainTool } from "@/engine/types";
 
 type Point = [number, number, number];
+type Point2 = { x: number; z: number };
+type RockComponent = { group: number; indices: number[] };
 
 export class TerrainSystem {
   readonly resolution = WORLD_CONFIG.segments + 1;
   readonly cellSize = WORLD_CONFIG.size / WORLD_CONFIG.segments;
   readonly mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>;
+  readonly rockMesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>;
 
   heights: Float32Array<ArrayBufferLike> = new Float32Array(this.resolution * this.resolution);
   sourceIndex = 0;
@@ -20,25 +23,43 @@ export class TerrainSystem {
   private originalHeights: Float32Array<ArrayBufferLike> = new Float32Array(this.heights.length);
   private readonly watered = new Uint8Array(this.resolution * this.resolution);
   private readonly permanentlyGreen = new Uint8Array(this.resolution * this.resolution);
+  private readonly rockPaint = new Uint8Array(this.resolution * this.resolution);
+  private readonly rockGroups = new Uint32Array(this.resolution * this.resolution);
+  /** Exact height of the visible low-poly stone at each covered terrain sample. */
+  private readonly rockSurfaceHeights = new Float32Array(this.resolution * this.resolution);
+  private readonly rockVisualSink = new Float32Array(this.resolution * this.resolution);
   private readonly greenableCells = new Uint8Array(WORLD_CONFIG.segments * WORLD_CONFIG.segments);
   private dryColors = new Float32Array(0);
   private wateredColors = new Float32Array(0);
   private readonly generator = new MountainGenerator();
   private seedHash = 0;
+  private nextRockGroupId = 1;
+  private activeRockGroupId = 0;
+  private rockBodiesDirty = false;
 
   constructor(private readonly scene: THREE.Scene, seed: string) {
-    const material = new THREE.MeshStandardMaterial({
-      vertexColors: true,
-      flatShading: true,
-      roughness: 0.93,
-      metalness: 0,
-      side: THREE.DoubleSide,
-    });
+    const material = this.createTerrainMaterial();
     this.mesh = new THREE.Mesh(new THREE.BufferGeometry(), material);
     this.mesh.name = "procedural-mountain";
     this.mesh.castShadow = true;
     this.mesh.receiveShadow = true;
     this.scene.add(this.mesh);
+
+    this.rockMesh = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      flatShading: true,
+      roughness: 0.98,
+      metalness: 0,
+      side: THREE.DoubleSide,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    }));
+    this.rockMesh.name = "painted-low-poly-boulders";
+    this.rockMesh.castShadow = true;
+    this.rockMesh.receiveShadow = true;
+    this.rockMesh.renderOrder = 1;
+    this.scene.add(this.rockMesh);
     this.regenerate(seed);
   }
 
@@ -53,13 +74,24 @@ export class TerrainSystem {
     this.seedHash = Array.from(seed).reduce((sum, char) => sum + char.charCodeAt(0), 0);
     this.watered.fill(0);
     this.permanentlyGreen.fill(0);
+    this.rockPaint.fill(0);
+    this.rockGroups.fill(0);
+    this.rockSurfaceHeights.fill(Number.NaN);
+    this.rockVisualSink.fill(0);
+    this.nextRockGroupId = 1;
+    this.activeRockGroupId = 0;
+    this.rebuildRockBodies();
+    this.rebuildRockVisualSink();
     this.rebuildGeometry();
     return mountain;
   }
 
   reset(): void {
     this.heights.set(this.originalHeights);
-    this.recalculateRange();
+    const largestGroup = this.findLargestRockGroup();
+    for (let group = 1; group <= largestGroup; group += 1) this.sculptRockGroupHeight(group);
+    this.rebuildRockBodies();
+    this.rebuildRockVisualSink();
     this.rebuildGeometry();
   }
 
@@ -81,13 +113,17 @@ export class TerrainSystem {
   isGreenAt(worldX: number, worldZ: number): boolean {
     const { x, z } = this.worldToGrid(worldX, worldZ);
     const index = z * this.resolution + x;
-    return this.permanentlyGreen[index] !== 0 || this.watered[index] !== 0;
+    return this.rockPaint[index] === 0 && (this.permanentlyGreen[index] !== 0 || this.watered[index] !== 0);
   }
 
   /** Whether this point is green specifically because it is near visible water. */
   isWateredAt(worldX: number, worldZ: number): boolean {
     const { x, z } = this.worldToGrid(worldX, worldZ);
     return this.watered[z * this.resolution + x] !== 0;
+  }
+
+  isRockIndex(index: number): boolean {
+    return index >= 0 && index < this.rockPaint.length && this.rockPaint[index] !== 0;
   }
 
   /** Pick a genuinely water-greened terrain point inside a world-space X band. */
@@ -114,7 +150,7 @@ export class TerrainSystem {
     for (let z = 0; z < WORLD_CONFIG.segments; z += 1) {
       for (let x = startX; x <= endX; x += 1) {
         const cellIndex = z * WORLD_CONFIG.segments + x;
-        if (this.greenableCells[cellIndex] === 0 || !this.cellHasWater(x, z)) continue;
+        if (this.greenableCells[cellIndex] === 0 || this.cellHasRock(x, z) || !this.cellHasWater(x, z)) continue;
         candidates += 1;
         if (random() <= 1 / candidates) {
           selectedX = x;
@@ -144,6 +180,65 @@ export class TerrainSystem {
     this.refreshTerrainColors();
   }
 
+  getRockPaintState(): number[] {
+    return Array.from(this.rockPaint);
+  }
+
+  getRockGroupState(): number[] {
+    return Array.from(this.rockGroups);
+  }
+
+  loadRockPaintState(
+    state?: readonly number[],
+    groups?: readonly number[],
+    heightsIntegrated = false,
+  ): void {
+    this.rockPaint.fill(0);
+    this.rockGroups.fill(0);
+    if (state) {
+      const length = Math.min(state.length, this.rockPaint.length);
+      for (let i = 0; i < length; i += 1) this.rockPaint[i] = state[i] ? 1 : 0;
+    }
+    let largestGroup = 0;
+    if (groups) {
+      const length = Math.min(groups.length, this.rockGroups.length);
+      for (let i = 0; i < length; i += 1) {
+        if (this.rockPaint[i] === 0) continue;
+        const group = Math.max(0, Math.floor(groups[i] ?? 0));
+        this.rockGroups[i] = group;
+        largestGroup = Math.max(largestGroup, group);
+      }
+    }
+    this.assignGroupsToUngroupedRock(largestGroup + 1);
+    this.nextRockGroupId = Math.max(largestGroup + 1, this.findLargestRockGroup() + 1);
+    if (!heightsIntegrated) {
+      for (let group = 1; group < this.nextRockGroupId; group += 1) this.sculptRockGroupHeight(group);
+    }
+    this.activeRockGroupId = 0;
+    this.rockBodiesDirty = false;
+    this.rebuildRockBodies();
+    this.rebuildRockVisualSink();
+    this.rebuildGeometry();
+  }
+
+  beginStroke(tool: TerrainTool): void {
+    this.activeRockGroupId = tool === "paint-rock" ? this.nextRockGroupId++ : 0;
+  }
+
+  finishStroke(): void {
+    const completedRockGroup = this.activeRockGroupId;
+    this.activeRockGroupId = 0;
+    if (completedRockGroup !== 0) {
+      this.sealRockGroupFootprint(completedRockGroup);
+      this.sculptRockGroupHeight(completedRockGroup);
+    }
+    if (!this.rockBodiesDirty) return;
+    this.rockBodiesDirty = false;
+    this.rebuildRockBodies();
+    this.rebuildRockVisualSink();
+    this.rebuildGeometry();
+  }
+
   /** Share of currently yellow, colorable ground that is green because of water. */
   getWateredYellowPercentage(): number {
     let yellowCells = 0;
@@ -152,7 +247,7 @@ export class TerrainSystem {
     for (let z = 0; z < WORLD_CONFIG.segments; z += 1) {
       for (let x = 0; x < WORLD_CONFIG.segments; x += 1) {
         const cellIndex = z * WORLD_CONFIG.segments + x;
-        if (this.greenableCells[cellIndex] === 0 || this.cellHasPermanentGreen(x, z)) continue;
+        if (this.greenableCells[cellIndex] === 0 || this.cellHasPermanentGreen(x, z) || this.cellHasRock(x, z)) continue;
         yellowCells += 1;
         if (this.cellHasWater(x, z)) wateredYellowCells += 1;
       }
@@ -168,12 +263,13 @@ export class TerrainSystem {
     radius: number,
     strength: number,
     deltaTime: number,
+    protectRock = false,
   ): boolean {
     if (tool === "orbit") return false;
     const center = this.worldToGrid(worldX, worldZ);
     const gridRadius = Math.ceil(radius / this.cellSize);
-    if (tool === "paint-green" || tool === "paint-yellow") {
-      return this.applyGroundPaint(center, gridRadius, worldX, worldZ, radius, tool === "paint-green");
+    if (tool === "paint-green" || tool === "paint-yellow" || tool === "paint-rock") {
+      return this.applySurfacePaint(center, gridRadius, worldX, worldZ, radius, tool);
     }
     const before = tool === "smooth" ? this.heights.slice() : this.heights;
     let changed = false;
@@ -186,6 +282,9 @@ export class TerrainSystem {
         const normalized = 1 - distance / radius;
         const falloff = normalized * normalized * (3 - 2 * normalized);
         const index = z * this.resolution + x;
+        const protectedRock = this.rockPaint[index] !== 0
+          && (tool === "smooth" || (protectRock && (tool === "carve" || tool === "raise")));
+        if (protectedRock) continue;
         const current = this.heights[index];
         let next = current;
 
@@ -214,6 +313,7 @@ export class TerrainSystem {
     if (changed) {
       this.recalculateRange();
       this.rebuildGeometry();
+      this.rockBodiesDirty = true;
     }
     return changed;
   }
@@ -260,8 +360,11 @@ export class TerrainSystem {
 
   dispose(): void {
     this.scene.remove(this.mesh);
+    this.scene.remove(this.rockMesh);
     this.mesh.geometry.dispose();
     this.mesh.material.dispose();
+    this.rockMesh.geometry.dispose();
+    this.rockMesh.material.dispose();
   }
 
   private worldToGrid(worldX: number, worldZ: number): { x: number; z: number } {
@@ -281,10 +384,14 @@ export class TerrainSystem {
     const half = WORLD_CONFIG.size / 2;
     let cursor = 0;
     this.greenableCells.fill(0);
+    type TerrainPoint = { position: Point; index: number };
 
-    const point = (x: number, z: number): Point => {
+    const point = (x: number, z: number): TerrainPoint => {
       const index = z * this.resolution + x;
-      return [x * this.cellSize - half, this.heights[index], z * this.cellSize - half];
+      return {
+        position: [x * this.cellSize - half, this.heights[index], z * this.cellSize - half],
+        index,
+      };
     };
 
     for (let z = 0; z < WORLD_CONFIG.segments; z += 1) {
@@ -293,28 +400,41 @@ export class TerrainSystem {
         const p10 = point(x + 1, z);
         const p01 = point(x, z + 1);
         const p11 = point(x + 1, z + 1);
-        const triangles: [Point, Point, Point][] = (x + z) % 2 === 0
+        const triangles: [TerrainPoint, TerrainPoint, TerrainPoint][] = (x + z) % 2 === 0
           ? [[p00, p01, p10], [p10, p01, p11]]
           : [[p00, p01, p11], [p00, p11, p10]];
 
         triangles.forEach((triangle, triangleIndex) => {
-          const faceColors = this.faceColors(triangle, x, z, triangleIndex);
+          const trianglePoints: [Point, Point, Point] = [
+            triangle[0].position,
+            triangle[1].position,
+            triangle[2].position,
+          ];
+          const faceColors = this.faceColors(trianglePoints, x, z, triangleIndex);
           if (!faceColors.dry.equals(faceColors.watered)) {
             this.greenableCells[z * WORLD_CONFIG.segments + x] = 1;
           }
           const color = this.cellIsGreen(x, z) ? faceColors.watered : faceColors.dry;
           for (const vertex of triangle) {
-            positions[cursor] = vertex[0];
+            const rockSurface = this.rockSurfaceHeights[vertex.index];
+            const terrainSink = this.rockVisualSink[vertex.index];
+            // The terrain below a boulder is only a hidden support surface. Clamp
+            // it beneath the exact faceted stone height so it can never pierce the
+            // stone after neighboring ground is carved or raised.
+            const displayHeight = Number.isFinite(rockSurface)
+              ? Math.min(vertex.position[1], rockSurface - 0.025 - terrainSink)
+              : vertex.position[1];
+            positions[cursor] = vertex.position[0];
             colors[cursor] = color.r;
             dryColors[cursor] = faceColors.dry.r;
             wateredColors[cursor] = faceColors.watered.r;
             cursor += 1;
-            positions[cursor] = vertex[1];
+            positions[cursor] = displayHeight;
             colors[cursor] = color.g;
             dryColors[cursor] = faceColors.dry.g;
             wateredColors[cursor] = faceColors.watered.g;
             cursor += 1;
-            positions[cursor] = vertex[2];
+            positions[cursor] = vertex.position[2];
             colors[cursor] = color.b;
             dryColors[cursor] = faceColors.dry.b;
             wateredColors[cursor] = faceColors.watered.b;
@@ -334,6 +454,475 @@ export class TerrainSystem {
     this.mesh.geometry = geometry;
     this.dryColors = dryColors;
     this.wateredColors = wateredColors;
+  }
+
+  private createTerrainMaterial(): THREE.MeshStandardMaterial {
+    return new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      flatShading: true,
+      roughness: 0.93,
+      metalness: 0,
+      side: THREE.DoubleSide,
+    });
+  }
+
+  /** Rebuild every stroke/component as one self-contained, coarse faceted boulder. */
+  private rebuildRockBodies(): void {
+    const positions: number[] = [];
+    const colors: number[] = [];
+    const half = WORLD_CONFIG.size * 0.5;
+    let faceIndex = 0;
+    this.rockSurfaceHeights.fill(Number.NaN);
+
+    const addFace = (
+      a: Point,
+      b: Point,
+      c: Point,
+      baseColor: string,
+      group: number,
+      surfaceFaces: Array<[Point, Point, Point]>,
+    ): void => {
+      // Clockwise X/Z winding points the face normal upward in Three.js coordinates.
+      const signedArea = (b[0] - a[0]) * (c[2] - a[2]) - (b[2] - a[2]) * (c[0] - a[0]);
+      const second = signedArea > 0 ? c : b;
+      const third = signedArea > 0 ? b : c;
+      surfaceFaces.push([a, second, third]);
+      const variation = 0.91 + hash2D(faceIndex * 3 + group, group * 7 + faceIndex, this.seedHash) * 0.17;
+      const color = new THREE.Color(baseColor).multiplyScalar(variation);
+      for (const point of [a, second, third]) {
+        positions.push(point[0], point[1], point[2]);
+        colors.push(color.r, color.g, color.b);
+      }
+      faceIndex += 1;
+    };
+
+    for (const component of this.collectRockComponents()) {
+      const surfaceFaces: Array<[Point, Point, Point]> = [];
+      const samples = component.indices.map((index) => ({
+        x: (index % this.resolution) * this.cellSize - half,
+        z: Math.floor(index / this.resolution) * this.cellSize - half,
+      }));
+      let hull = this.convexHull(samples);
+      if (hull.length < 3) continue;
+      hull = this.enrichHull(hull, 8);
+      hull = this.reduceHull(hull, 16);
+
+      const centroid = hull.reduce((sum, point) => ({ x: sum.x + point.x, z: sum.z + point.z }), { x: 0, z: 0 });
+      centroid.x /= hull.length;
+      centroid.z /= hull.length;
+
+      const outline = hull.map((point, index) => {
+        const dx = point.x - centroid.x;
+        const dz = point.z - centroid.z;
+        const length = Math.max(0.001, Math.hypot(dx, dz));
+        const irregularity = hash2D(index * 13 + component.group, component.group * 5 + index, this.seedHash);
+        // Roughly half a cell reaches the real boundary shared with open ground,
+        // so the coarse stone mesh and neighboring terrain meet at one contour.
+        const expansion = this.cellSize * (0.46 + irregularity * 0.08);
+        return {
+          x: THREE.MathUtils.clamp(point.x + (dx / length) * expansion, -half + 0.02, half - 0.02),
+          z: THREE.MathUtils.clamp(point.z + (dz / length) * expansion, -half + 0.02, half - 0.02),
+        };
+      });
+
+      let minX = Number.POSITIVE_INFINITY;
+      let maxX = Number.NEGATIVE_INFINITY;
+      let minZ = Number.POSITIVE_INFINITY;
+      let maxZ = Number.NEGATIVE_INFINITY;
+      for (const point of outline) {
+        minX = Math.min(minX, point.x);
+        maxX = Math.max(maxX, point.x);
+        minZ = Math.min(minZ, point.z);
+        maxZ = Math.max(maxZ, point.z);
+      }
+      const shortSpan = Math.max(this.cellSize, Math.min(maxX - minX, maxZ - minZ));
+
+      const outerRing: Point[] = outline.map((point) => [
+        point.x,
+        this.heightAt(point.x, point.z),
+        point.z,
+      ]);
+      const innerRing: Point[] = outline.map((point, index) => {
+        const scaleNoise = hash2D(index * 5 + 29, component.group * 11 + index, this.seedHash + 31);
+        const scale = 0.57 + scaleNoise * 0.055;
+        const x = THREE.MathUtils.lerp(centroid.x, point.x, scale);
+        const z = THREE.MathUtils.lerp(centroid.z, point.z, scale);
+        return [x, this.heightAt(x, z), z];
+      });
+      const crestNoise = hash2D(component.group * 19 + 5, component.group * 3 + 41, this.seedHash);
+      const crestAngle = crestNoise * Math.PI * 2;
+      const crestOffset = Math.min(shortSpan * 0.08, this.cellSize * 0.55);
+      const crestX = centroid.x + Math.cos(crestAngle) * crestOffset;
+      const crestZ = centroid.z + Math.sin(crestAngle) * crestOffset;
+      const crest: Point = [
+        crestX,
+        this.heightAt(crestX, crestZ),
+        crestZ,
+      ];
+
+      for (let i = 0; i < outline.length; i += 1) {
+        const next = (i + 1) % outline.length;
+        if ((i + component.group) % 2 === 0) {
+          addFace(outerRing[i], innerRing[next], outerRing[next], "#59615d", component.group, surfaceFaces);
+          addFace(outerRing[i], innerRing[i], innerRing[next], "#626a66", component.group, surfaceFaces);
+        } else {
+          addFace(outerRing[i], innerRing[i], outerRing[next], "#59615d", component.group, surfaceFaces);
+          addFace(outerRing[next], innerRing[i], innerRing[next], "#626a66", component.group, surfaceFaces);
+        }
+        addFace(innerRing[i], crest, innerRing[next], "#6d7470", component.group, surfaceFaces);
+      }
+
+      this.rasterizeRockSurface(surfaceFaces, minX, maxX, minZ, maxZ);
+    }
+
+    // Water and all other height-driven systems use the same surface that is
+    // actually rendered. The lowered support terrain remains a display-only
+    // concern inside rebuildGeometry().
+    for (let index = 0; index < this.heights.length; index += 1) {
+      const rockSurface = this.rockSurfaceHeights[index];
+      if (this.rockPaint[index] !== 0 && Number.isFinite(rockSurface)) {
+        this.heights[index] = rockSurface;
+      }
+    }
+    this.recalculateRange();
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+    if (positions.length > 0) {
+      geometry.computeVertexNormals();
+      geometry.computeBoundingBox();
+      geometry.computeBoundingSphere();
+    }
+    this.rockMesh.geometry.dispose();
+    this.rockMesh.geometry = geometry;
+    this.rockMesh.visible = positions.length > 0;
+  }
+
+  /** Sample the rendered stone triangles back onto the hydraulic terrain grid. */
+  private rasterizeRockSurface(
+    faces: Array<[Point, Point, Point]>,
+    minWorldX: number,
+    maxWorldX: number,
+    minWorldZ: number,
+    maxWorldZ: number,
+  ): void {
+    const half = WORLD_CONFIG.size * 0.5;
+    const startX = THREE.MathUtils.clamp(Math.floor((minWorldX + half) / this.cellSize) - 1, 0, this.resolution - 1);
+    const endX = THREE.MathUtils.clamp(Math.ceil((maxWorldX + half) / this.cellSize) + 1, 0, this.resolution - 1);
+    const startZ = THREE.MathUtils.clamp(Math.floor((minWorldZ + half) / this.cellSize) - 1, 0, this.resolution - 1);
+    const endZ = THREE.MathUtils.clamp(Math.ceil((maxWorldZ + half) / this.cellSize) + 1, 0, this.resolution - 1);
+
+    for (let z = startZ; z <= endZ; z += 1) {
+      for (let x = startX; x <= endX; x += 1) {
+        const worldX = x * this.cellSize - half;
+        const worldZ = z * this.cellSize - half;
+        let surface = Number.NEGATIVE_INFINITY;
+        for (const face of faces) {
+          const sampled = this.triangleHeightAt(worldX, worldZ, face);
+          if (sampled !== null) surface = Math.max(surface, sampled);
+        }
+        if (!Number.isFinite(surface)) continue;
+        const index = z * this.resolution + x;
+        const previous = this.rockSurfaceHeights[index];
+        this.rockSurfaceHeights[index] = Number.isFinite(previous) ? Math.max(previous, surface) : surface;
+      }
+    }
+  }
+
+  private triangleHeightAt(worldX: number, worldZ: number, face: [Point, Point, Point]): number | null {
+    const [a, b, c] = face;
+    const denominator = (b[2] - c[2]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[2] - c[2]);
+    if (Math.abs(denominator) < 0.000001) return null;
+    const weightA = ((b[2] - c[2]) * (worldX - c[0]) + (c[0] - b[0]) * (worldZ - c[2])) / denominator;
+    const weightB = ((c[2] - a[2]) * (worldX - c[0]) + (a[0] - c[0]) * (worldZ - c[2])) / denominator;
+    const weightC = 1 - weightA - weightB;
+    const epsilon = -0.0001;
+    if (weightA < epsilon || weightB < epsilon || weightC < epsilon) return null;
+    return weightA * a[1] + weightB * b[1] + weightC * c[1];
+  }
+
+  private collectRockComponents(): RockComponent[] {
+    const components: RockComponent[] = [];
+    const visited = new Uint8Array(this.rockPaint.length);
+    const neighborOffsets = [-1, 0, 1];
+
+    for (let start = 0; start < this.rockPaint.length; start += 1) {
+      const group = this.rockGroups[start];
+      if (visited[start] !== 0 || this.rockPaint[start] === 0 || group === 0) continue;
+      const queue = [start];
+      const indices: number[] = [];
+      visited[start] = 1;
+
+      for (let cursor = 0; cursor < queue.length; cursor += 1) {
+        const index = queue[cursor];
+        indices.push(index);
+        const x = index % this.resolution;
+        const z = Math.floor(index / this.resolution);
+        for (const dz of neighborOffsets) {
+          for (const dx of neighborOffsets) {
+            if (dx === 0 && dz === 0) continue;
+            const nx = x + dx;
+            const nz = z + dz;
+            if (nx < 0 || nz < 0 || nx >= this.resolution || nz >= this.resolution) continue;
+            const neighbor = nz * this.resolution + nx;
+            if (visited[neighbor] !== 0 || this.rockPaint[neighbor] === 0 || this.rockGroups[neighbor] !== group) continue;
+            visited[neighbor] = 1;
+            queue.push(neighbor);
+          }
+        }
+      }
+      if (indices.length >= 3) components.push({ group, indices });
+    }
+    return components;
+  }
+
+  private convexHull(points: Point2[]): Point2[] {
+    const sorted = [...points].sort((a, b) => a.x - b.x || a.z - b.z);
+    if (sorted.length <= 3) return sorted;
+    const cross = (origin: Point2, a: Point2, b: Point2): number =>
+      (a.x - origin.x) * (b.z - origin.z) - (a.z - origin.z) * (b.x - origin.x);
+    const lower: Point2[] = [];
+    for (const point of sorted) {
+      while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], point) <= 0) lower.pop();
+      lower.push(point);
+    }
+    const upper: Point2[] = [];
+    for (let i = sorted.length - 1; i >= 0; i -= 1) {
+      const point = sorted[i];
+      while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], point) <= 0) upper.pop();
+      upper.push(point);
+    }
+    lower.pop();
+    upper.pop();
+    return [...lower, ...upper];
+  }
+
+  private reduceHull(points: Point2[], maximum: number): Point2[] {
+    const reduced = [...points];
+    while (reduced.length > maximum) {
+      let removeAt = 0;
+      let smallestCorner = Number.POSITIVE_INFINITY;
+      for (let i = 0; i < reduced.length; i += 1) {
+        const previous = reduced[(i - 1 + reduced.length) % reduced.length];
+        const current = reduced[i];
+        const next = reduced[(i + 1) % reduced.length];
+        const corner = Math.abs(
+          (current.x - previous.x) * (next.z - current.z)
+          - (current.z - previous.z) * (next.x - current.x),
+        );
+        if (corner < smallestCorner) {
+          smallestCorner = corner;
+          removeAt = i;
+        }
+      }
+      reduced.splice(removeAt, 1);
+    }
+    return reduced;
+  }
+
+  private enrichHull(points: Point2[], minimum: number): Point2[] {
+    const enriched = [...points];
+    while (enriched.length < minimum) {
+      let longestEdge = 0;
+      let longestLength = -1;
+      for (let i = 0; i < enriched.length; i += 1) {
+        const next = enriched[(i + 1) % enriched.length];
+        const length = Math.hypot(next.x - enriched[i].x, next.z - enriched[i].z);
+        if (length > longestLength) {
+          longestLength = length;
+          longestEdge = i;
+        }
+      }
+      const nextIndex = (longestEdge + 1) % enriched.length;
+      const a = enriched[longestEdge];
+      const b = enriched[nextIndex];
+      enriched.splice(longestEdge + 1, 0, { x: (a.x + b.x) * 0.5, z: (a.z + b.z) * 0.5 });
+    }
+    return enriched;
+  }
+
+  private assignGroupsToUngroupedRock(firstGroup: number): void {
+    let nextGroup = Math.max(1, firstGroup);
+    const visited = new Uint8Array(this.rockPaint.length);
+    for (let start = 0; start < this.rockPaint.length; start += 1) {
+      if (visited[start] !== 0 || this.rockPaint[start] === 0 || this.rockGroups[start] !== 0) continue;
+      const queue = [start];
+      visited[start] = 1;
+      this.rockGroups[start] = nextGroup;
+      for (let cursor = 0; cursor < queue.length; cursor += 1) {
+        const index = queue[cursor];
+        const x = index % this.resolution;
+        const z = Math.floor(index / this.resolution);
+        for (let dz = -1; dz <= 1; dz += 1) {
+          for (let dx = -1; dx <= 1; dx += 1) {
+            if (dx === 0 && dz === 0) continue;
+            const nx = x + dx;
+            const nz = z + dz;
+            if (nx < 0 || nz < 0 || nx >= this.resolution || nz >= this.resolution) continue;
+            const neighbor = nz * this.resolution + nx;
+            if (visited[neighbor] !== 0 || this.rockPaint[neighbor] === 0 || this.rockGroups[neighbor] !== 0) continue;
+            visited[neighbor] = 1;
+            this.rockGroups[neighbor] = nextGroup;
+            queue.push(neighbor);
+          }
+        }
+      }
+      nextGroup += 1;
+    }
+  }
+
+  private findLargestRockGroup(): number {
+    let largest = 0;
+    for (let i = 0; i < this.rockGroups.length; i += 1) largest = Math.max(largest, this.rockGroups[i]);
+    return largest;
+  }
+
+  /** Close small gaps inside a stroke so the visible boulder and protected footprint agree. */
+  private sealRockGroupFootprint(group: number): void {
+    const points: Point2[] = [];
+    for (let index = 0; index < this.rockGroups.length; index += 1) {
+      if (this.rockPaint[index] === 0 || this.rockGroups[index] !== group) continue;
+      points.push({ x: index % this.resolution, z: Math.floor(index / this.resolution) });
+    }
+    const hull = this.convexHull(points);
+    if (hull.length < 3) return;
+    const minX = Math.max(0, Math.floor(Math.min(...hull.map((point) => point.x))));
+    const maxX = Math.min(this.resolution - 1, Math.ceil(Math.max(...hull.map((point) => point.x))));
+    const minZ = Math.max(0, Math.floor(Math.min(...hull.map((point) => point.z))));
+    const maxZ = Math.min(this.resolution - 1, Math.ceil(Math.max(...hull.map((point) => point.z))));
+
+    for (let z = minZ; z <= maxZ; z += 1) {
+      for (let x = minX; x <= maxX; x += 1) {
+        let inside = true;
+        for (let i = 0; i < hull.length; i += 1) {
+          const a = hull[i];
+          const b = hull[(i + 1) % hull.length];
+          if ((b.x - a.x) * (z - a.z) - (b.z - a.z) * (x - a.x) < -0.0001) {
+            inside = false;
+            break;
+          }
+        }
+        if (!inside) continue;
+        const index = z * this.resolution + x;
+        this.rockPaint[index] = 1;
+        this.rockGroups[index] = group;
+        this.permanentlyGreen[index] = 0;
+        this.rockBodiesDirty = true;
+      }
+    }
+  }
+
+  /** Shape the real simulation height field into a low, coherent stone cap. */
+  private sculptRockGroupHeight(group: number): void {
+    const indices: number[] = [];
+    const half = WORLD_CONFIG.size * 0.5;
+    let meanX = 0;
+    let meanZ = 0;
+    let meanHeight = 0;
+    let minX = Number.POSITIVE_INFINITY;
+    let maxX = Number.NEGATIVE_INFINITY;
+    let minZ = Number.POSITIVE_INFINITY;
+    let maxZ = Number.NEGATIVE_INFINITY;
+
+    for (let index = 0; index < this.rockGroups.length; index += 1) {
+      if (this.rockPaint[index] === 0 || this.rockGroups[index] !== group) continue;
+      indices.push(index);
+      const x = (index % this.resolution) * this.cellSize - half;
+      const z = Math.floor(index / this.resolution) * this.cellSize - half;
+      meanX += x;
+      meanZ += z;
+      meanHeight += this.heights[index];
+      minX = Math.min(minX, x);
+      maxX = Math.max(maxX, x);
+      minZ = Math.min(minZ, z);
+      maxZ = Math.max(maxZ, z);
+    }
+    if (indices.length < 3) return;
+    meanX /= indices.length;
+    meanZ /= indices.length;
+    meanHeight /= indices.length;
+
+    // Least-squares plane retains the large-scale terrain slope while removing
+    // the small grid bumps that previously pierced the coarse stone surface.
+    let xx = 0;
+    let zz = 0;
+    let xz = 0;
+    let xh = 0;
+    let zh = 0;
+    for (const index of indices) {
+      const x = (index % this.resolution) * this.cellSize - half - meanX;
+      const z = Math.floor(index / this.resolution) * this.cellSize - half - meanZ;
+      const height = this.heights[index] - meanHeight;
+      xx += x * x;
+      zz += z * z;
+      xz += x * z;
+      xh += x * height;
+      zh += z * height;
+    }
+    const determinant = xx * zz - xz * xz;
+    const slopeX = Math.abs(determinant) > 0.0001
+      ? THREE.MathUtils.clamp((xh * zz - zh * xz) / determinant, -1.8, 1.8)
+      : 0;
+    const slopeZ = Math.abs(determinant) > 0.0001
+      ? THREE.MathUtils.clamp((zh * xx - xh * xz) / determinant, -1.8, 1.8)
+      : 0;
+    const shortSpan = Math.max(this.cellSize, Math.min(maxX - minX, maxZ - minZ));
+    const longSpan = Math.max(maxX - minX, maxZ - minZ);
+    const capHeight = THREE.MathUtils.clamp(shortSpan * 0.055 + longSpan * 0.018, 0.18, 0.58);
+    const searchRadius = 5;
+
+    for (const index of indices) {
+      const gridX = index % this.resolution;
+      const gridZ = Math.floor(index / this.resolution);
+      let nearestEdge = searchRadius + 1;
+      for (let dz = -searchRadius; dz <= searchRadius; dz += 1) {
+        for (let dx = -searchRadius; dx <= searchRadius; dx += 1) {
+          const x = gridX + dx;
+          const z = gridZ + dz;
+          const outside = x < 0 || z < 0 || x >= this.resolution || z >= this.resolution;
+          if (!outside) {
+            const neighbor = z * this.resolution + x;
+            if (this.rockPaint[neighbor] !== 0 && this.rockGroups[neighbor] === group) continue;
+          }
+          nearestEdge = Math.min(nearestEdge, Math.hypot(dx, dz));
+        }
+      }
+
+      const normalized = THREE.MathUtils.clamp((nearestEdge - 0.5) / 3, 0, 1);
+      const profile = normalized * normalized * (3 - 2 * normalized);
+      const worldX = gridX * this.cellSize - half;
+      const worldZ = gridZ * this.cellSize - half;
+      const planeHeight = meanHeight + slopeX * (worldX - meanX) + slopeZ * (worldZ - meanZ);
+      const targetHeight = planeHeight + capHeight * profile;
+      this.heights[index] = THREE.MathUtils.lerp(this.heights[index], targetHeight, profile);
+    }
+    this.recalculateRange();
+    this.rockBodiesDirty = true;
+  }
+
+  /** Hide only the interior terrain grid; boundary vertices remain shared with open ground. */
+  private rebuildRockVisualSink(): void {
+    this.rockVisualSink.fill(0);
+    const radius = 2;
+    for (let index = 0; index < this.rockPaint.length; index += 1) {
+      if (this.rockPaint[index] === 0) continue;
+      const gridX = index % this.resolution;
+      const gridZ = Math.floor(index / this.resolution);
+      let nearestOpenGround = radius + 1;
+      for (let dz = -radius; dz <= radius; dz += 1) {
+        for (let dx = -radius; dx <= radius; dx += 1) {
+          const x = gridX + dx;
+          const z = gridZ + dz;
+          const outside = x < 0 || z < 0 || x >= this.resolution || z >= this.resolution;
+          if (!outside && this.rockPaint[z * this.resolution + x] !== 0) continue;
+          nearestOpenGround = Math.min(nearestOpenGround, Math.hypot(dx, dz));
+        }
+      }
+      const normalized = THREE.MathUtils.clamp((nearestOpenGround - 1.42) / 0.85, 0, 1);
+      const smooth = normalized * normalized * (3 - 2 * normalized);
+      this.rockVisualSink[index] = smooth * 0.16;
+    }
   }
 
   private faceColors(
@@ -415,6 +1004,14 @@ export class TerrainSystem {
       || this.watered[topLeft + this.resolution + 1] !== 0;
   }
 
+  private cellHasRock(x: number, z: number): boolean {
+    const topLeft = z * this.resolution + x;
+    return this.rockPaint[topLeft] !== 0
+      && this.rockPaint[topLeft + 1] !== 0
+      && this.rockPaint[topLeft + this.resolution] !== 0
+      && this.rockPaint[topLeft + this.resolution + 1] !== 0;
+  }
+
   private refreshTerrainColors(): void {
     const attribute = this.mesh.geometry.getAttribute("color") as THREE.BufferAttribute | undefined;
     if (!attribute || this.dryColors.length !== attribute.array.length) return;
@@ -433,32 +1030,50 @@ export class TerrainSystem {
   }
 
   private vertexIsGreen(index: number): boolean {
-    return this.permanentlyGreen[index] !== 0 || this.watered[index] !== 0;
+    return this.rockPaint[index] === 0 && (this.permanentlyGreen[index] !== 0 || this.watered[index] !== 0);
   }
 
-  private applyGroundPaint(
+  private applySurfacePaint(
     center: { x: number; z: number },
     gridRadius: number,
     worldX: number,
     worldZ: number,
     radius: number,
-    makeGreen: boolean,
+    tool: "paint-green" | "paint-yellow" | "paint-rock",
   ): boolean {
-    const nextValue = makeGreen ? 1 : 0;
     let changed = false;
+    let rockChanged = false;
+    const strokeGroup = tool === "paint-rock"
+      ? (this.activeRockGroupId || this.nextRockGroupId++)
+      : 0;
 
     for (let z = Math.max(0, center.z - gridRadius); z <= Math.min(this.resolution - 1, center.z + gridRadius); z += 1) {
       for (let x = Math.max(0, center.x - gridRadius); x <= Math.min(this.resolution - 1, center.x + gridRadius); x += 1) {
         const index = z * this.resolution + x;
         const position = this.indexToWorld(index);
         if (Math.hypot(position.x - worldX, position.z - worldZ) >= radius) continue;
-        if (this.permanentlyGreen[index] === nextValue) continue;
-        this.permanentlyGreen[index] = nextValue;
+        const nextGreen = tool === "paint-green" ? 1 : 0;
+        const nextRock = tool === "paint-rock" ? 1 : 0;
+        const nextGroup = nextRock !== 0 ? strokeGroup : 0;
+        if (
+          this.permanentlyGreen[index] === nextGreen
+          && this.rockPaint[index] === nextRock
+          && this.rockGroups[index] === nextGroup
+        ) continue;
+        this.permanentlyGreen[index] = nextGreen;
+        if (this.rockPaint[index] !== nextRock || this.rockGroups[index] !== nextGroup) rockChanged = true;
+        this.rockPaint[index] = nextRock;
+        this.rockGroups[index] = nextGroup;
         changed = true;
       }
     }
 
-    if (changed) this.refreshTerrainColors();
+    if (changed) {
+      if (rockChanged) {
+        this.rockBodiesDirty = true;
+      }
+      this.refreshTerrainColors();
+    }
     return changed;
   }
 

@@ -1,4 +1,4 @@
-export type TerrainTool = "orbit" | "carve" | "raise" | "smooth" | "paint-green" | "paint-yellow";
+export type TerrainTool = "orbit" | "carve" | "raise" | "smooth" | "paint-green" | "paint-yellow" | "paint-rock";
 
 export type MountainData = {
   heights: Float32Array;
@@ -33,6 +33,12 @@ export type MapSaveData = {
   seed: string;
   /** Permanently green ground painted by the user. Omitted by older saves. */
   groundPaint?: number[];
+  /** Protective ground covered by user-painted low-poly boulders. Omitted by older saves. */
+  rockPaint?: number[];
+  /** Per-vertex stroke group used to rebuild each painted low-poly boulder. */
+  rockGroups?: number[];
+  /** True when saved terrain heights already include the boulder surface profile. */
+  rockHeightsIntegrated?: boolean;
   /** Placed custom model instances (Y derived from terrain on load). */
   modelInstances: StoredModelInstance[];
 };

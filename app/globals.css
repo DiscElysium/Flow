@@ -52,7 +52,8 @@ button { color: inherit; }
 .world-canvas canvas[data-tool="raise"],
 .world-canvas canvas[data-tool="smooth"],
 .world-canvas canvas[data-tool="paint-green"],
-.world-canvas canvas[data-tool="paint-yellow"] { cursor: crosshair; }
+.world-canvas canvas[data-tool="paint-yellow"],
+.world-canvas canvas[data-tool="paint-rock"] { cursor: crosshair; }
 .world-canvas canvas[data-source-placement="active"] { cursor: cell; }
 
 .source-placement-tip {
@@ -503,6 +504,8 @@ input[type="range"]::-moz-range-thumb { width: 9px; height: 9px; border: 2px sol
   transform: translateX(-50%);
 }
 
+.tool-dock.is-play { width: min(410px, calc(100vw - 440px)); min-width: 380px; }
+
 .tool-group { display: flex; align-items: stretch; gap: 4px; }
 .tool-button {
   min-width: 64px;
@@ -621,6 +624,23 @@ input:disabled { cursor: not-allowed !important; opacity: .42; }
 .notes-panel li { display: grid; grid-template-columns: 110px 1fr; padding: 14px 0; border-top: 1px solid var(--line); }
 .notes-panel li b { font-size: 11px; }
 .notes-panel li span { color: #5c6964; font-size: 11px; line-height: 1.65; }
+.tutorial-panel { width: min(570px, 100%); }
+.tutorial-panel h2 { margin-bottom: 8px; }
+.tutorial-intro { margin: 0 0 24px; color: #66736e; font-size: 12px; line-height: 1.6; }
+.tutorial-panel li { grid-template-columns: 126px 1fr; }
+.tutorial-panel kbd {
+  display: inline-block;
+  margin: 0 2px;
+  padding: 1px 6px;
+  border: 1px solid rgba(48, 68, 60, .22);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, .42);
+  color: #334a41;
+  font: 600 9px/1.6 var(--font-geist-mono), monospace;
+  letter-spacing: .04em;
+  white-space: nowrap;
+}
 .notes-close { position: absolute; top: 16px; right: 16px; width: 32px; height: 32px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 50%; background: transparent; cursor: pointer; }
 
 .fallback-mountain {
@@ -690,6 +710,7 @@ input:disabled { cursor: not-allowed !important; opacity: .42; }
   .scene-intro { width: min(440px, 58vw); top: 20%; }
   .terrain-readout { top: 92px; bottom: auto; width: 218px; }
   .tool-dock { width: calc(100vw - 28px); min-width: 0; bottom: 15px; }
+  .tool-dock.is-play { width: calc(100vw - 28px); min-width: 0; }
   .brush-sliders { display: none; }
   .scene-index { display: none; }
   .render-warning { bottom: 96px; }
@@ -717,6 +738,7 @@ input:disabled { cursor: not-allowed !important; opacity: .42; }
   .notes-panel { padding: 28px 22px 22px; }
   .notes-panel h2 { font-size: 28px; }
   .notes-panel li { grid-template-columns: 82px 1fr; }
+  .tutorial-panel li { grid-template-columns: 102px 1fr; }
   .showcase-guide { bottom: 10px; width: calc(100vw - 20px); padding: 7px; }
   .showcase-guide div { padding: 3px 7px; }
   .showcase-guide b { font-size: 8px; }

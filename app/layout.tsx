@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Alpine Flow Lab — Procedural Low-Poly Terrain",
-  description: "一座可生成、可塑形并承载动态水流的低多边形山脉实验场。",
+  description: "A generative low-poly mountain lab shaped by terrain tools and dynamic water flow.",
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",
@@ -27,7 +27,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="zh-CN">
+    <html lang="en">
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
