@@ -15,13 +15,17 @@ function smoothstep(edge0: number, edge1: number, value: number): number {
 }
 
 export class MountainGenerator {
-  readonly resolution = WORLD_CONFIG.segments + 1;
+  readonly resolutionX = WORLD_CONFIG.segmentsX + 1;
+  readonly resolutionZ = WORLD_CONFIG.segmentsZ + 1;
 
   generate(seedLabel: string): MountainData {
     const seed = hashSeed(seedLabel);
     const random = mulberry32(seed);
     const noise = createNoise2D(random);
-    const heights = new Float32Array(this.resolution * this.resolution);
+    // Mountain construction happens on a full square based on the map's long
+    // side. Only after terrain shaping and erosion do we crop the playable
+    // strip from its center.
+    const heights = new Float32Array(this.resolutionX * this.resolutionX);
     // The ridge lives deliberately in the western half of the map. Seeded
     // rotation keeps each generated silhouette distinct without moving the
     // mountain into the plains.
@@ -174,18 +178,22 @@ export class MountainGenerator {
     let maximum = Number.NEGATIVE_INFINITY;
     let peakIndex = 0;
 
-    for (let z = 0; z < this.resolution; z += 1) {
-      for (let x = 0; x < this.resolution; x += 1) {
-        const nx = (x / (this.resolution - 1)) * 2 - 1;
-        const nz = (z / (this.resolution - 1)) * 2 - 1;
+    for (let z = 0; z < this.resolutionX; z += 1) {
+      for (let x = 0; x < this.resolutionX; x += 1) {
+        const nx = (x / (this.resolutionX - 1)) * 2 - 1;
+        const nz = (z / (this.resolutionX - 1)) * 2 - 1;
 
         const warpX = noise(nx * 1.25 + 17.3, nz * 1.25 - 8.1) * 0.085;
         const warpZ = noise(nx * 1.15 - 4.8, nz * 1.15 + 12.7) * 0.085;
         const wx = nx + warpX;
         const wz = nz + warpZ;
-        const mountainX = wx + 0.5;
-        const across = mountainX * cos + wz * sin;
-        const along = -mountainX * sin + wz * cos;
+        // Keep the massif against the distant western/northern boundary. Its
+        // hidden back face is allowed to continue beyond the visible square,
+        // leaving the playable strip focused on the descending front face.
+        const mountainX = wx + 0.68;
+        const mountainZ = wz + 0.34;
+        const across = mountainX * cos + mountainZ * sin;
+        const along = -mountainX * sin + mountainZ * cos;
         const primaryBend = noise(along * 0.82 + 30, 4.2) * 0.18;
         const secondaryBend = noise(along * 2.85 - 17, -31.4) * 0.062;
         const curlPhase = noise(along * 0.7 + 11, 12.8) * 1.7;
@@ -216,9 +224,9 @@ export class MountainGenerator {
         const edge = Math.max(Math.abs(nx), Math.abs(nz));
         const edgeFade = 1 - smoothstep(0.88, 1, edge);
         const endFade = 1 - smoothstep(0.72, 1.08, Math.abs(along));
-        // Begin the eastern falloff much earlier so elevation is shed across
-        // a long shoulder instead of collapsing at the mountain's foot.
-        const leftHalfMask = 1 - smoothstep(-0.34, 0.14, nx);
+        // Keep the summit and back face untouched, but let the plain-facing
+        // slope shed its elevation across a longer run toward the east.
+        const leftHalfMask = 1 - smoothstep(-0.34, 0.3, nx);
         const mountainEnvelope = Math.exp(
           -Math.pow(Math.abs(mountainX) / 0.76, 2.15)
           -Math.pow(Math.abs(along) / 1.02, 5.2),
@@ -226,7 +234,7 @@ export class MountainGenerator {
         const faceEnvelope = Math.exp(
           -Math.pow(Math.abs(mountainX) / 0.86, 2.05)
           -Math.pow(Math.abs(along) / 1.04, 5),
-        ) * (1 - smoothstep(-0.22, 0.2, nx)) * edgeFade * endFade;
+        ) * (1 - smoothstep(-0.22, 0.34, nx)) * edgeFade * endFade;
         const mainPeak = peakCenters[0];
         const mainPeakDistance = Math.hypot(
           (along - mainPeak.along) / (mainPeak.alongWidth * 1.15),
@@ -411,7 +419,7 @@ export class MountainGenerator {
 
         // A broken band of foothills interrupts the overall descent and makes
         // the mountain read as a range with shoulders, hollows and low passes.
-        const foothillBand = smoothstep(-0.5, -0.2, nx) * (1 - smoothstep(0.08, 0.3, nx));
+        const foothillBand = smoothstep(-0.5, -0.2, nx) * (1 - smoothstep(0.1, 0.42, nx));
         const foothillField = noise(nx * 3.15 + 126, nz * 3.15 - 77) * 0.5 + 0.5;
         const foothillDetail = noise(nx * 6.4 - 43, nz * 6.4 + 15) * 0.5 + 0.5;
         const foothillHeight = foothillBand
@@ -419,7 +427,7 @@ export class MountainGenerator {
           * (2.2 + foothillDetail * 3.8)
           * edgeFade;
         const piedmontRise = smoothstep(-0.46, -0.18, nx);
-        const piedmontFade = 1 - smoothstep(-0.18, 0.38, nx);
+        const piedmontFade = 1 - smoothstep(-0.18, 0.46, nx);
         const piedmontNoise = noise(nx * 1.72 + 184, nz * 1.72 - 112) * 0.5 + 0.5;
         const piedmontBase = piedmontRise
           * piedmontFade
@@ -427,9 +435,17 @@ export class MountainGenerator {
           * endFade
           * edgeFade;
         const rollingFoothills = piedmontRise
-          * (1 - smoothstep(-0.02, 0.36, nx))
+          * (1 - smoothstep(0.04, 0.44, nx))
           * smoothstep(0.46, 0.76, piedmontNoise)
           * (1.8 + foothillDetail * 3.2)
+          * edgeFade;
+        const transitionHillBand = smoothstep(-0.4, -0.22, nx)
+          * (1 - smoothstep(0.1, 0.38, nx));
+        const transitionHillField = noise(nx * 2.7 + 932, nz * 2.7 - 814) * 0.5 + 0.5;
+        const transitionHillDetail = noise(nx * 5.6 - 286, nz * 5.6 + 741) * 0.5 + 0.5;
+        const transitionHills = transitionHillBand
+          * smoothstep(0.42, 0.72, transitionHillField)
+          * (0.75 + transitionHillDetail * 1.45)
           * edgeFade;
         const footScarpLine = -0.24 + noise(nz * 1.35 + 307, 19.2) * 0.09;
         const scarpPresence = smoothstep(
@@ -457,7 +473,7 @@ export class MountainGenerator {
 
         // A noisy coastline creates a non-uniform beach, then sinks into a
         // shallow procedural seabed at the far-right edge.
-        const coastline = 0.68
+        const coastline = 0.82
           + noise(nz * 1.55 + 211, -14.7) * 0.048
           + noise(nz * 4.8 - 83, 42.3) * 0.014;
         const beachStart = coastline - 0.13;
@@ -489,13 +505,18 @@ export class MountainGenerator {
           + foothillHeight
           + piedmontBase
           + rollingFoothills
+          + transitionHills
           + footScarp
           - foothillGully
         ) * MASSIF_VERTICAL_SCALE;
-        let height = coastalHeight + mountainHeight;
-        height = Math.max(WORLD_CONFIG.minHeight, Math.min(WORLD_CONFIG.maxHeight, height));
+        // A broad west-to-east grade keeps the entire long map visibly
+        // descending from the mountain end toward the coast, including the
+        // quieter foothill and plain regions between the two.
+        const longitudinalGrade = (1 - smoothstep(-0.9, 0.64, nx)) * 4.2;
+        let height = coastalHeight + mountainHeight + longitudinalGrade;
+        height = Math.max(WORLD_CONFIG.baseMinHeight, Math.min(WORLD_CONFIG.baseMaxHeight, height));
 
-        const index = z * this.resolution + x;
+        const index = z * this.resolutionX + x;
         heights[index] = height;
         if (height > maximum) {
           maximum = height;
@@ -507,33 +528,58 @@ export class MountainGenerator {
 
     this.erode(heights, 12);
 
+    for (let index = 0; index < heights.length; index += 1) {
+      const scaledHeight = WORLD_CONFIG.seaLevel
+        + (heights[index] - WORLD_CONFIG.seaLevel) * WORLD_CONFIG.verticalScale;
+      heights[index] = Math.max(WORLD_CONFIG.minHeight, Math.min(WORLD_CONFIG.maxHeight, scaledHeight));
+    }
+
+    const croppedHeights = new Float32Array(this.resolutionX * this.resolutionZ);
+    const cropStartZ = Math.floor((this.resolutionX - this.resolutionZ) * 0.5);
     minimum = Number.POSITIVE_INFINITY;
     maximum = Number.NEGATIVE_INFINITY;
-    for (let i = 0; i < heights.length; i += 1) {
-      minimum = Math.min(minimum, heights[i]);
-      if (heights[i] > maximum) {
-        maximum = heights[i];
-        peakIndex = i;
+    peakIndex = 0;
+    for (let z = 0; z < this.resolutionZ; z += 1) {
+      const squareRow = (z + cropStartZ) * this.resolutionX;
+      const croppedRow = z * this.resolutionX;
+      for (let x = 0; x < this.resolutionX; x += 1) {
+        const index = croppedRow + x;
+        const height = heights[squareRow + x];
+        croppedHeights[index] = height;
+        minimum = Math.min(minimum, height);
+        if (height > maximum) {
+          maximum = height;
+          peakIndex = index;
+        }
       }
     }
 
-    const sourceIndex = this.findGlacierSource(heights, maximum, peakIndex);
-    return { heights, peakIndex, sourceIndex, minHeight: minimum, maxHeight: maximum };
+    const sourceIndex = this.findGlacierSource(croppedHeights, maximum, peakIndex);
+    return {
+      heights: croppedHeights,
+      squareHeights: heights,
+      activeCropStartZ: cropStartZ,
+      peakIndex,
+      sourceIndex,
+      minHeight: minimum,
+      maxHeight: maximum,
+    };
   }
 
   private erode(heights: Float32Array, iterations: number): void {
     const delta = new Float32Array(heights.length);
-    const n = this.resolution;
+    const width = this.resolutionX;
+    const rows = this.resolutionX;
     const talus = 0.65;
 
     for (let iteration = 0; iteration < iterations; iteration += 1) {
       delta.fill(0);
-      for (let z = 1; z < n - 1; z += 1) {
-        for (let x = 1; x < n - 1; x += 1) {
-          const index = z * n + x;
+      for (let z = 1; z < rows - 1; z += 1) {
+        for (let x = 1; x < width - 1; x += 1) {
+          const index = z * width + x;
           let lowestIndex = index;
           let largestDrop = 0;
-          const neighbors = [index - 1, index + 1, index - n, index + n];
+          const neighbors = [index - 1, index + 1, index - width, index + width];
           for (const neighbor of neighbors) {
             const drop = heights[index] - heights[neighbor];
             if (drop > largestDrop) {
@@ -553,27 +599,31 @@ export class MountainGenerator {
   }
 
   private findGlacierSource(heights: Float32Array, maximum: number, peakIndex: number): number {
-    const n = this.resolution;
-    const peakX = peakIndex % n;
-    const peakZ = Math.floor(peakIndex / n);
+    const width = this.resolutionX;
+    const rows = this.resolutionZ;
+    const peakX = peakIndex % width;
+    const peakZ = Math.floor(peakIndex / width);
     let bestIndex = peakIndex;
     let bestScore = Number.NEGATIVE_INFINITY;
 
-    for (let z = 4; z < n - 4; z += 1) {
-      for (let x = 4; x < n - 4; x += 1) {
-        const index = z * n + x;
+    for (let z = 4; z < rows - 4; z += 1) {
+      for (let x = 4; x < width - 4; x += 1) {
+        const index = z * width + x;
         const height = heights[index];
         if (height < maximum * 0.7 || height > maximum * 0.96) continue;
         const lowestNeighbor = Math.min(
           heights[index - 1],
           heights[index + 1],
-          heights[index - n],
-          heights[index + n],
+          heights[index - width],
+          heights[index + width],
         );
         const drop = height - lowestNeighbor;
-        const peakDistance = Math.hypot(x - peakX, z - peakZ) / n;
+        const peakDistance = Math.hypot(
+          (x - peakX) / (width - 1),
+          (z - peakZ) / (width - 1),
+        );
         if (peakDistance < 0.025 || peakDistance > 0.14) continue;
-        const eastward = (x - peakX) / n;
+        const eastward = (x - peakX) / (width - 1);
         const score = drop * 5 + height * 0.14 - peakDistance * 12 + eastward * 3.2;
         if (score > bestScore) {
           bestScore = score;

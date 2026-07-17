@@ -35,9 +35,9 @@ type FlightState = {
   birds: BirdMember[];
 };
 
-const TRIGGER_MIN_X = -WORLD_CONFIG.size * 0.12;
-const TRIGGER_MAX_X = WORLD_CONFIG.size * 0.4;
-const CLOUD_WRAP = WORLD_CONFIG.size * 0.86;
+const TRIGGER_MIN_X = -WORLD_CONFIG.sizeX * 0.12;
+const TRIGGER_MAX_X = WORLD_CONFIG.sizeX * 0.4;
+const CLOUD_WRAP = WORLD_CONFIG.sizeX * 0.86;
 
 function createWingGeometry(side: 1 | -1): THREE.BufferGeometry {
   const geometry = new THREE.BufferGeometry();
@@ -145,6 +145,7 @@ export class SkyWildlifeSystem {
   private rebuildClouds(): void {
     this.cloudRoot.clear();
     this.clouds = [];
+    const verticalScale = WORLD_CONFIG.verticalScale;
 
     const layerCounts = {
       mountain: 6,
@@ -193,25 +194,32 @@ export class SkyWildlifeSystem {
         let speed: number;
 
         if (layer === "mountain") {
-          baseY = Math.max(36, this.terrain.maxHeight - range(this.random, 8, 19));
+          baseY = Math.max(
+            36 * verticalScale,
+            this.terrain.maxHeight - range(this.random, 8 * verticalScale, 19 * verticalScale),
+          );
           minX = -CLOUD_WRAP;
-          maxX = WORLD_CONFIG.size * 0.14;
-          minZ = -WORLD_CONFIG.size * 0.58;
-          maxZ = WORLD_CONFIG.size * 0.58;
+          maxX = WORLD_CONFIG.sizeX * 0.14;
+          minZ = -WORLD_CONFIG.sizeZ * 0.58;
+          maxZ = WORLD_CONFIG.sizeZ * 0.58;
           speed = range(this.random, 0.09, 0.22);
         } else if (layer === "high") {
-          baseY = this.terrain.maxHeight + range(this.random, 28, 58);
+          baseY = this.terrain.maxHeight + range(
+            this.random,
+            28 * verticalScale,
+            58 * verticalScale,
+          );
           minX = -CLOUD_WRAP;
           maxX = CLOUD_WRAP;
-          minZ = -WORLD_CONFIG.size * 0.72;
-          maxZ = WORLD_CONFIG.size * 0.72;
+          minZ = -WORLD_CONFIG.sizeZ * 0.72;
+          maxZ = WORLD_CONFIG.sizeZ * 0.72;
           speed = range(this.random, 0.12, 0.28);
         } else {
-          baseY = range(this.random, 22, 39);
-          minX = WORLD_CONFIG.size * 0.23;
+          baseY = range(this.random, 22 * verticalScale, 39 * verticalScale);
+          minX = WORLD_CONFIG.sizeX * 0.23;
           maxX = CLOUD_WRAP;
-          minZ = -WORLD_CONFIG.size * 0.64;
-          maxZ = WORLD_CONFIG.size * 0.64;
+          minZ = -WORLD_CONFIG.sizeZ * 0.64;
+          maxZ = WORLD_CONFIG.sizeZ * 0.64;
           speed = range(this.random, 0.07, 0.18);
         }
 
@@ -240,14 +248,14 @@ export class SkyWildlifeSystem {
       cloud.group.position.x += cloud.speed * deltaTime;
       if (cloud.group.position.x > cloud.maxX) cloud.group.position.x = cloud.minX;
       cloud.group.position.y = cloud.baseY
-        + Math.sin(timeMs * 0.00008 + cloud.phase) * 0.42;
+        + Math.sin(timeMs * 0.00008 + cloud.phase) * 0.42 * WORLD_CONFIG.verticalScale;
     }
   }
 
   private beginFlight(target: THREE.Vector3): void {
     this.birdRoot.clear();
     const direction: 1 | -1 = this.random() < 0.5 ? 1 : -1;
-    const edge = WORLD_CONFIG.size * 0.5 + 22;
+    const edge = WORLD_CONFIG.sizeX * 0.5 + 22;
     const startX = direction > 0 ? -edge : edge;
     const endX = -startX;
     const speed = range(this.random, 16, 22);
@@ -284,7 +292,14 @@ export class SkyWildlifeSystem {
       endX,
       targetX: target.x,
       targetZ: target.z,
-      baseY: Math.max(24, target.y + range(this.random, 15, 22)),
+      baseY: Math.max(
+        24 * WORLD_CONFIG.verticalScale,
+        target.y + range(
+          this.random,
+          15 * WORLD_CONFIG.verticalScale,
+          22 * WORLD_CONFIG.verticalScale,
+        ),
+      ),
       elapsed: 0,
       duration: Math.abs(endX - startX) / speed,
       birds,
@@ -307,7 +322,8 @@ export class SkyWildlifeSystem {
     const targetProgress = (flight.targetX - flight.startX) / (flight.endX - flight.startX);
     const leaderZ = flight.targetZ
       + Math.sin((clampedProgress - targetProgress) * Math.PI * 2) * 0.9;
-    const leaderY = flight.baseY + Math.sin(clampedProgress * Math.PI) * 4;
+    const leaderY = flight.baseY
+      + Math.sin(clampedProgress * Math.PI) * 4 * WORLD_CONFIG.verticalScale;
 
     for (const bird of flight.birds) {
       const bob = Math.sin(timeMs * 0.006 + bird.phase) * 0.18;

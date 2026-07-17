@@ -2,6 +2,10 @@ export type TerrainTool = "orbit" | "carve" | "raise" | "smooth" | "paint-green"
 
 export type MountainData = {
   heights: Float32Array;
+  /** Full static square used to render non-interactive side scenery. */
+  squareHeights: Float32Array;
+  /** First square-grid row occupied by the active simulation strip. */
+  activeCropStartZ: number;
   peakIndex: number;
   sourceIndex: number;
   minHeight: number;
@@ -24,6 +28,11 @@ export type WorldEventHandlers = {
 };
 
 export type MapSaveData = {
+  /** Grid dimensions allow saves to be validated after world-shape changes. */
+  gridWidth?: number;
+  gridHeight?: number;
+  /** Vertical scale used when the save was written. */
+  verticalScale?: number;
   heights: number[];
   waterDepths: number[];
   sourceIndex: number;
@@ -31,6 +40,8 @@ export type MapSaveData = {
   minHeight: number;
   maxHeight: number;
   seed: string;
+  /** Legacy guided-camera setting retained only for old save compatibility. */
+  playCameraHeight?: number;
   /** Permanently green ground painted by the user. Omitted by older saves. */
   groundPaint?: number[];
   /** Protective ground covered by user-painted low-poly boulders. Omitted by older saves. */

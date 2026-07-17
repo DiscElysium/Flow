@@ -164,7 +164,8 @@ export class WaterRenderSystem {
     const shoreSkirt = this.createBuffers();
     const waterfall = this.createBuffers();
     const resolution = this.terrain.resolution;
-    const half = WORLD_CONFIG.size / 2;
+    const halfX = WORLD_CONFIG.sizeX * 0.5;
+    const halfZ = WORLD_CONFIG.sizeZ * 0.5;
 
     const sample = (x: number, z: number): Sample => {
       const index = z * resolution + x;
@@ -177,9 +178,9 @@ export class WaterRenderSystem {
         TERRAIN_CLEARANCE_FULL,
       );
       return {
-        x: x * this.terrain.cellSize - half,
+        x: x * this.terrain.cellSize - halfX,
         y,
-        z: z * this.terrain.cellSize - half,
+        z: z * this.terrain.cellSize - halfZ,
         sourceA: index,
         sourceB: index,
         sourceMix: 0,
@@ -194,8 +195,8 @@ export class WaterRenderSystem {
       };
     };
 
-    for (let z = 0; z < resolution - 1; z += 1) {
-      for (let x = 0; x < resolution - 1; x += 1) {
+    for (let z = 0; z < this.terrain.resolutionZ - 1; z += 1) {
+      for (let x = 0; x < this.terrain.resolutionX - 1; x += 1) {
         const p00 = sample(x, z);
         const p10 = sample(x + 1, z);
         const p11 = sample(x + 1, z + 1);
@@ -395,14 +396,14 @@ export class WaterRenderSystem {
     material.onBeforeCompile = (shader) => {
       shader.uniforms.uWaterTime = this.timeUniform;
       shader.uniforms.uWaterCoverage = { value: this.visualCoverageTexture };
-      shader.uniforms.uWaterWorldSize = { value: WORLD_CONFIG.size };
+      shader.uniforms.uWaterWorldSize = { value: new THREE.Vector2(WORLD_CONFIG.sizeX, WORLD_CONFIG.sizeZ) };
       shader.vertexShader = shader.vertexShader
         .replace(
           "#include <common>",
           `#include <common>
           uniform float uWaterTime;
           uniform sampler2D uWaterCoverage;
-          uniform float uWaterWorldSize;
+          uniform vec2 uWaterWorldSize;
           attribute vec2 waterFlow;
           attribute float waterSpeed;
           attribute float waterTurbulence;
@@ -479,7 +480,7 @@ export class WaterRenderSystem {
           `#include <common>
           uniform float uWaterTime;
           uniform sampler2D uWaterCoverage;
-          uniform float uWaterWorldSize;
+          uniform vec2 uWaterWorldSize;
           varying vec2 vWaterFlow;
           varying float vWaterSpeed;
           varying float vWaterLake;
@@ -497,7 +498,7 @@ export class WaterRenderSystem {
   }
 
   private createFixedSurfaceGeometry(): THREE.BufferGeometry {
-    const vertexCount = this.terrain.resolution * this.terrain.resolution;
+    const vertexCount = this.terrain.resolutionX * this.terrain.resolutionZ;
     const positions = new Float32Array(vertexCount * 3);
     const colors = new Float32Array(vertexCount * 3);
     const depths = new Float32Array(vertexCount);
@@ -510,14 +511,15 @@ export class WaterRenderSystem {
     const sourceMixes = new Float32Array(vertexCount);
     const heightOffsets = new Float32Array(vertexCount);
     const indices: number[] = [];
-    const half = WORLD_CONFIG.size * 0.5;
+    const halfX = WORLD_CONFIG.sizeX * 0.5;
+    const halfZ = WORLD_CONFIG.sizeZ * 0.5;
 
-    for (let z = 0; z < this.terrain.resolution; z += 1) {
-      for (let x = 0; x < this.terrain.resolution; x += 1) {
+    for (let z = 0; z < this.terrain.resolutionZ; z += 1) {
+      for (let x = 0; x < this.terrain.resolutionX; x += 1) {
         const index = z * this.terrain.resolution + x;
-        positions[index * 3] = x * this.terrain.cellSize - half;
+        positions[index * 3] = x * this.terrain.cellSize - halfX;
         positions[index * 3 + 1] = this.terrain.heights[index] + 0.025;
-        positions[index * 3 + 2] = z * this.terrain.cellSize - half;
+        positions[index * 3 + 2] = z * this.terrain.cellSize - halfZ;
         colors[index * 3] = this.shallowColor.r;
         colors[index * 3 + 1] = this.shallowColor.g;
         colors[index * 3 + 2] = this.shallowColor.b;
@@ -525,8 +527,8 @@ export class WaterRenderSystem {
         sourcesB[index] = index;
       }
     }
-    for (let z = 0; z < this.terrain.resolution - 1; z += 1) {
-      for (let x = 0; x < this.terrain.resolution - 1; x += 1) {
+    for (let z = 0; z < this.terrain.resolutionZ - 1; z += 1) {
+      for (let x = 0; x < this.terrain.resolutionX - 1; x += 1) {
         const a = z * this.terrain.resolution + x;
         const b = a + 1;
         const c = a + this.terrain.resolution;
@@ -621,22 +623,39 @@ export class WaterRenderSystem {
     if (!position || !sourceA || !sourceB || !sourceMix || !heightOffset
       || !depthAttribute || !flowAttribute || !speedAttribute || !lakeAttribute) return;
 
+    const positionValues = position.array as Float32Array;
+    const sourceAValues = sourceA.array as Float32Array;
+    const sourceBValues = sourceB.array as Float32Array;
+    const sourceMixValues = sourceMix.array as Float32Array;
+    const heightOffsetValues = heightOffset.array as Float32Array;
+    const depthValues = depthAttribute.array as Float32Array;
+    const flowValues = flowAttribute.array as Float32Array;
+    const speedValues = speedAttribute.array as Float32Array;
+    const turbulenceValues = turbulenceAttribute?.array as Float32Array | undefined;
+    const lakeValues = lakeAttribute.array as Float32Array;
+    const colorValues = colorAttribute?.array as Float32Array | undefined;
+
     for (let vertex = 0; vertex < position.count; vertex += 1) {
-      const a = Math.round(sourceA.getX(vertex));
-      const b = Math.round(sourceB.getX(vertex));
-      const mix = sourceMix.getX(vertex);
-      const interpolate = (values: Float32Array): number => THREE.MathUtils.lerp(values[a], values[b], mix);
-      const offset = heightOffset.getX(vertex);
-      const dynamicDepth = interpolate(depth);
-      position.setY(vertex, interpolate(surfaceHeights) + offset);
-      depthAttribute.setX(vertex, dynamicDepth);
-      flowAttribute.setXY(vertex, interpolate(flowX), interpolate(flowZ));
-      speedAttribute.setX(vertex, interpolate(flowSpeed));
-      if (turbulenceAttribute) turbulenceAttribute.setX(vertex, interpolate(turbulence));
-      lakeAttribute.setX(vertex, interpolate(lakeFactor));
-      if (colorAttribute) {
+      const a = Math.round(sourceAValues[vertex]);
+      const b = Math.round(sourceBValues[vertex]);
+      const mix = sourceMixValues[vertex];
+      const dynamicDepth = depth[a] + (depth[b] - depth[a]) * mix;
+      positionValues[vertex * 3 + 1] = surfaceHeights[a]
+        + (surfaceHeights[b] - surfaceHeights[a]) * mix
+        + heightOffsetValues[vertex];
+      depthValues[vertex] = dynamicDepth;
+      flowValues[vertex * 2] = flowX[a] + (flowX[b] - flowX[a]) * mix;
+      flowValues[vertex * 2 + 1] = flowZ[a] + (flowZ[b] - flowZ[a]) * mix;
+      speedValues[vertex] = flowSpeed[a] + (flowSpeed[b] - flowSpeed[a]) * mix;
+      if (turbulenceValues) {
+        turbulenceValues[vertex] = turbulence[a] + (turbulence[b] - turbulence[a]) * mix;
+      }
+      lakeValues[vertex] = lakeFactor[a] + (lakeFactor[b] - lakeFactor[a]) * mix;
+      if (colorValues) {
         this.resolveDepthColor(dynamicDepth, false, this.depthColorScratch);
-        colorAttribute.setXYZ(vertex, this.depthColorScratch.r, this.depthColorScratch.g, this.depthColorScratch.b);
+        colorValues[vertex * 3] = this.depthColorScratch.r;
+        colorValues[vertex * 3 + 1] = this.depthColorScratch.g;
+        colorValues[vertex * 3 + 2] = this.depthColorScratch.b;
       }
     }
     position.needsUpdate = true;

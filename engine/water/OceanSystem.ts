@@ -11,11 +11,16 @@ export class OceanSystem {
   private readonly deepColor = { value: new THREE.Color("#163f5b") };
 
   constructor(private readonly scene: THREE.Scene) {
-    const startX = WORLD_CONFIG.size * 0.285;
-    const endX = WORLD_CONFIG.size * 1.28;
+    // The coast now occupies roughly half its former west-east span. Extend
+    // the water across the full square's static side scenery without adding
+    // any CPU-side simulation work.
+    const startX = WORLD_CONFIG.sizeX * 0.41;
+    const endX = startX + WORLD_CONFIG.sizeX * 0.4975;
     const width = endX - startX;
-    const depth = WORLD_CONFIG.size * 1.55;
-    const geometry = new THREE.PlaneGeometry(width, depth, 72, 84);
+    const depth = WORLD_CONFIG.sizeX * 1.08;
+    const shallowEndX = startX + width * 0.06;
+    const deepStartX = startX + width * 0.84;
+    const geometry = new THREE.PlaneGeometry(width, depth, 48, 72);
     geometry.rotateX(-Math.PI / 2);
     geometry.translate(startX + width * 0.5, WORLD_CONFIG.seaLevel, 0);
 
@@ -42,7 +47,7 @@ export class OceanSystem {
         .replace(
           "#include <begin_vertex>",
           `vec3 transformed = vec3(position);
-          vOceanDepthMix = smoothstep(${(WORLD_CONFIG.size * 0.32).toFixed(2)}, ${(WORLD_CONFIG.size * 0.78).toFixed(2)}, position.x);
+          vOceanDepthMix = smoothstep(${shallowEndX.toFixed(2)}, ${deepStartX.toFixed(2)}, position.x);
           float oceanWaveA = sin(position.x * 0.105 + uOceanTime * 0.72 + sin(position.z * 0.035));
           float oceanWaveB = sin(position.z * 0.16 - uOceanTime * 0.56 + position.x * 0.028);
           float oceanWaveC = sin((position.x + position.z) * 0.245 + uOceanTime * 0.91);
@@ -68,7 +73,7 @@ export class OceanSystem {
           diffuseColor.a *= mix(0.68, 1.0, vOceanDepthMix);`,
         );
     };
-    material.customProgramCacheKey = () => "procedural-ocean-depth-v2";
+    material.customProgramCacheKey = () => "procedural-ocean-depth-v3";
 
     this.mesh = new THREE.Mesh(geometry, material);
     this.mesh.name = "procedural-ocean";

@@ -99,19 +99,23 @@ export class ScenerySystem {
   regenerate(seed: string): void {
     this.clearMeshes();
     const random = mulberry32(hashSeed(`${seed}-scenery`));
-    const half = WORLD_CONFIG.size * 0.47;
+    const halfX = WORLD_CONFIG.sizeX * 0.47;
+    const halfZ = WORLD_CONFIG.sizeZ * 0.47;
+    const verticalScale = WORLD_CONFIG.verticalScale;
+    const scaledHeight = (baseHeight: number): number => WORLD_CONFIG.seaLevel
+      + (baseHeight - WORLD_CONFIG.seaLevel) * verticalScale;
     const exclusion = 8.6;
     this.trees = [];
     this.rocks = [];
     this.flowers = [];
 
     for (let attempt = 0; attempt < 6000 && this.trees.length < 360; attempt += 1) {
-      const x = range(random, -half, half);
-      const z = range(random, -half, half);
+      const x = range(random, -halfX, halfX);
+      const z = range(random, -halfZ, halfZ);
       const height = this.terrain.heightAt(x, z);
       const slope = this.terrain.slopeAt(x, z);
       const heightRatio = Math.max(0, height) / this.terrain.maxHeight;
-      if (height < 0.3 || heightRatio > 0.82 || slope > 0.78) continue;
+      if (height < scaledHeight(0.3) || heightRatio > 0.82 || slope > 0.78 * verticalScale) continue;
       if (heightRatio > 0.47) {
         const alpineProgress = THREE.MathUtils.smoothstep(heightRatio, 0.47, 0.82);
         const alpineDensity = THREE.MathUtils.lerp(0.2, 0.035, alpineProgress);
@@ -129,12 +133,12 @@ export class ScenerySystem {
       this.terrain.heightAt(tree.x, tree.z) / this.terrain.maxHeight > 0.47
     )).length;
     for (let attempt = 0; attempt < 3200 && alpineTreeCount < 6; attempt += 1) {
-      const x = range(random, -half, 0);
-      const z = range(random, -half, half);
+      const x = range(random, -halfX, 0);
+      const z = range(random, -halfZ, halfZ);
       const height = this.terrain.heightAt(x, z);
       const heightRatio = height / this.terrain.maxHeight;
       const slope = this.terrain.slopeAt(x, z);
-      if (heightRatio < 0.5 || heightRatio > 0.78 || slope > 0.68) continue;
+      if (heightRatio < 0.5 || heightRatio > 0.78 || slope > 0.68 * verticalScale) continue;
       if (Math.hypot(x - source.x, z - source.z) < 3.2) continue;
       if (random() > 0.38) continue;
       const scale = range(random, 0.44, 0.78) * (1 - heightRatio * 0.22);
@@ -144,11 +148,11 @@ export class ScenerySystem {
     }
 
     for (let attempt = 0; attempt < 2800 && this.rocks.length < 108; attempt += 1) {
-      const x = range(random, -half, half);
-      const z = range(random, -half, half);
+      const x = range(random, -halfX, halfX);
+      const z = range(random, -halfZ, halfZ);
       const height = this.terrain.heightAt(x, z);
       const slope = this.terrain.slopeAt(x, z);
-      if (height < this.terrain.maxHeight * 0.25 || height > this.terrain.maxHeight * 0.78 || slope < 0.25) continue;
+      if (height < this.terrain.maxHeight * 0.25 || height > this.terrain.maxHeight * 0.78 || slope < 0.25 * verticalScale) continue;
       const tint = new THREE.Color("#858983").lerp(new THREE.Color("#b2b4ae"), random() * 0.35);
       this.rocks.push({ x, z, scale: range(random, 0.4, 1.1), rotation: random() * Math.PI * 2, color: tint });
     }
@@ -160,11 +164,13 @@ export class ScenerySystem {
 
     // Watered ground now carries flowers alone, grouped into generous colonies.
     for (let attempt = 0; attempt < 650 && this.flowers.length < 1600; attempt += 1) {
-      const centerX = range(coverRandom, -half + 1, half - 1);
-      const centerZ = range(coverRandom, -half + 1, half - 1);
+      const centerX = range(coverRandom, -halfX + 1, halfX - 1);
+      const centerZ = range(coverRandom, -halfZ + 1, halfZ - 1);
       const centerHeight = this.terrain.heightAt(centerX, centerZ);
       const centerHeightRatio = centerHeight / this.terrain.maxHeight;
-      if (centerHeight < 0.35 || centerHeightRatio > 0.52 || this.terrain.slopeAt(centerX, centerZ) > 0.42) continue;
+      if (centerHeight < scaledHeight(0.35)
+        || centerHeightRatio > 0.52
+        || this.terrain.slopeAt(centerX, centerZ) > 0.42 * verticalScale) continue;
 
       const clusterSize = Math.floor(range(coverRandom, 10, 21));
       for (let member = 0; member < clusterSize && this.flowers.length < 1600; member += 1) {
@@ -174,7 +180,9 @@ export class ScenerySystem {
         const z = centerZ + Math.sin(angle) * radius;
         const height = this.terrain.heightAt(x, z);
         const heightRatio = height / this.terrain.maxHeight;
-        if (height < 0.35 || heightRatio > 0.52 || this.terrain.slopeAt(x, z) > 0.42) continue;
+        if (height < scaledHeight(0.35)
+          || heightRatio > 0.52
+          || this.terrain.slopeAt(x, z) > 0.42 * verticalScale) continue;
         this.flowers.push({
           x,
           z,

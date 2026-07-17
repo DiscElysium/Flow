@@ -7,28 +7,36 @@ import type { MountainData, TerrainTool } from "@/engine/types";
 type Point = [number, number, number];
 type Point2 = { x: number; z: number };
 type RockComponent = { group: number; indices: number[] };
+const scaledWorldHeight = (baseHeight: number): number => WORLD_CONFIG.seaLevel
+  + (baseHeight - WORLD_CONFIG.seaLevel) * WORLD_CONFIG.verticalScale;
 
 export class TerrainSystem {
-  readonly resolution = WORLD_CONFIG.segments + 1;
+  readonly resolutionX = WORLD_CONFIG.segmentsX + 1;
+  readonly resolutionZ = WORLD_CONFIG.segmentsZ + 1;
+  /** Row stride retained under the old name for flat-array indexing. */
+  readonly resolution = this.resolutionX;
   readonly cellSize = WORLD_CONFIG.size / WORLD_CONFIG.segments;
   readonly mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>;
+  readonly backgroundMesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>;
   readonly rockMesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>;
 
-  heights: Float32Array<ArrayBufferLike> = new Float32Array(this.resolution * this.resolution);
+  heights: Float32Array<ArrayBufferLike> = new Float32Array(this.resolutionX * this.resolutionZ);
   sourceIndex = 0;
   peakIndex = 0;
   minHeight: number = WORLD_CONFIG.minHeight;
   maxHeight: number = WORLD_CONFIG.maxHeight;
 
   private originalHeights: Float32Array<ArrayBufferLike> = new Float32Array(this.heights.length);
-  private readonly watered = new Uint8Array(this.resolution * this.resolution);
-  private readonly permanentlyGreen = new Uint8Array(this.resolution * this.resolution);
-  private readonly rockPaint = new Uint8Array(this.resolution * this.resolution);
-  private readonly rockGroups = new Uint32Array(this.resolution * this.resolution);
+  private readonly watered = new Uint8Array(this.resolutionX * this.resolutionZ);
+  private readonly permanentlyGreen = new Uint8Array(this.resolutionX * this.resolutionZ);
+  private readonly rockPaint = new Uint8Array(this.resolutionX * this.resolutionZ);
+  private readonly rockGroups = new Uint32Array(this.resolutionX * this.resolutionZ);
   /** Exact height of the visible low-poly stone at each covered terrain sample. */
-  private readonly rockSurfaceHeights = new Float32Array(this.resolution * this.resolution);
-  private readonly rockVisualSink = new Float32Array(this.resolution * this.resolution);
-  private readonly greenableCells = new Uint8Array(WORLD_CONFIG.segments * WORLD_CONFIG.segments);
+  private readonly rockSurfaceHeights = new Float32Array(this.resolutionX * this.resolutionZ);
+  private readonly rockVisualSink = new Float32Array(this.resolutionX * this.resolutionZ);
+  private readonly greenableCells = new Uint8Array(WORLD_CONFIG.segmentsX * WORLD_CONFIG.segmentsZ);
+  private squareHeights = new Float32Array(0);
+  private activeCropStartZ = 0;
   private dryColors = new Float32Array(0);
   private wateredColors = new Float32Array(0);
   private readonly generator = new MountainGenerator();
@@ -44,6 +52,14 @@ export class TerrainSystem {
     this.mesh.castShadow = true;
     this.mesh.receiveShadow = true;
     this.scene.add(this.mesh);
+
+    this.backgroundMesh = new THREE.Mesh(new THREE.BufferGeometry(), this.createTerrainMaterial());
+    this.backgroundMesh.name = "static-side-terrain";
+    this.backgroundMesh.castShadow = false;
+    this.backgroundMesh.receiveShadow = true;
+    this.backgroundMesh.matrixAutoUpdate = false;
+    this.backgroundMesh.updateMatrix();
+    this.scene.add(this.backgroundMesh);
 
     this.rockMesh = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshStandardMaterial({
       vertexColors: true,
@@ -71,9 +87,13 @@ export class TerrainSystem {
     this.peakIndex = mountain.peakIndex;
     this.minHeight = mountain.minHeight;
     this.maxHeight = mountain.maxHeight;
+    this.squareHeights = mountain.squareHeights;
+    this.activeCropStartZ = mountain.activeCropStartZ;
     this.seedHash = Array.from(seed).reduce((sum, char) => sum + char.charCodeAt(0), 0);
     this.watered.fill(0);
-    this.permanentlyGreen.fill(0);
+    // New terrain begins as healthy green ground. The yellow brush can still
+    // opt individual areas back into the water-responsive dry state.
+    this.permanentlyGreen.fill(1);
     this.rockPaint.fill(0);
     this.rockGroups.fill(0);
     this.rockSurfaceHeights.fill(Number.NaN);
@@ -82,6 +102,7 @@ export class TerrainSystem {
     this.activeRockGroupId = 0;
     this.rebuildRockBodies();
     this.rebuildRockVisualSink();
+    this.rebuildBackgroundGeometry();
     this.rebuildGeometry();
     return mountain;
   }
@@ -132,24 +153,25 @@ export class TerrainSystem {
     maxWorldX: number,
     random: () => number = Math.random,
   ): THREE.Vector3 | null {
-    const half = WORLD_CONFIG.size * 0.5;
+    const halfX = WORLD_CONFIG.sizeX * 0.5;
+    const halfZ = WORLD_CONFIG.sizeZ * 0.5;
     const startX = THREE.MathUtils.clamp(
-      Math.floor((Math.min(minWorldX, maxWorldX) + half) / this.cellSize),
+      Math.floor((Math.min(minWorldX, maxWorldX) + halfX) / this.cellSize),
       0,
-      WORLD_CONFIG.segments - 1,
+      WORLD_CONFIG.segmentsX - 1,
     );
     const endX = THREE.MathUtils.clamp(
-      Math.ceil((Math.max(minWorldX, maxWorldX) + half) / this.cellSize),
+      Math.ceil((Math.max(minWorldX, maxWorldX) + halfX) / this.cellSize),
       0,
-      WORLD_CONFIG.segments - 1,
+      WORLD_CONFIG.segmentsX - 1,
     );
     let selectedX = -1;
     let selectedZ = -1;
     let candidates = 0;
 
-    for (let z = 0; z < WORLD_CONFIG.segments; z += 1) {
+    for (let z = 0; z < WORLD_CONFIG.segmentsZ; z += 1) {
       for (let x = startX; x <= endX; x += 1) {
-        const cellIndex = z * WORLD_CONFIG.segments + x;
+        const cellIndex = z * WORLD_CONFIG.segmentsX + x;
         if (this.greenableCells[cellIndex] === 0 || this.cellHasRock(x, z) || !this.cellHasWater(x, z)) continue;
         candidates += 1;
         if (random() <= 1 / candidates) {
@@ -162,8 +184,8 @@ export class TerrainSystem {
     // Ignore a few isolated wet vertices; a visible green patch should exist
     // before wildlife treats the river as established habitat.
     if (candidates < 6 || selectedX < 0 || selectedZ < 0) return null;
-    const worldX = (selectedX + 0.5) * this.cellSize - half;
-    const worldZ = (selectedZ + 0.5) * this.cellSize - half;
+    const worldX = (selectedX + 0.5) * this.cellSize - halfX;
+    const worldZ = (selectedZ + 0.5) * this.cellSize - halfZ;
     return new THREE.Vector3(worldX, this.heightAt(worldX, worldZ), worldZ);
   }
 
@@ -172,8 +194,9 @@ export class TerrainSystem {
   }
 
   loadGroundPaintState(state?: readonly number[]): void {
-    this.permanentlyGreen.fill(0);
-    if (state) {
+    const hasSavedPaint = Boolean(state && state.length > 0);
+    this.permanentlyGreen.fill(hasSavedPaint ? 0 : 1);
+    if (hasSavedPaint && state) {
       const length = Math.min(state.length, this.permanentlyGreen.length);
       for (let i = 0; i < length; i += 1) this.permanentlyGreen[i] = state[i] ? 1 : 0;
     }
@@ -244,9 +267,9 @@ export class TerrainSystem {
     let yellowCells = 0;
     let wateredYellowCells = 0;
 
-    for (let z = 0; z < WORLD_CONFIG.segments; z += 1) {
-      for (let x = 0; x < WORLD_CONFIG.segments; x += 1) {
-        const cellIndex = z * WORLD_CONFIG.segments + x;
+    for (let z = 0; z < WORLD_CONFIG.segmentsZ; z += 1) {
+      for (let x = 0; x < WORLD_CONFIG.segmentsX; x += 1) {
+        const cellIndex = z * WORLD_CONFIG.segmentsX + x;
         if (this.greenableCells[cellIndex] === 0 || this.cellHasPermanentGreen(x, z) || this.cellHasRock(x, z)) continue;
         yellowCells += 1;
         if (this.cellHasWater(x, z)) wateredYellowCells += 1;
@@ -274,8 +297,8 @@ export class TerrainSystem {
     const before = tool === "smooth" ? this.heights.slice() : this.heights;
     let changed = false;
 
-    for (let z = Math.max(1, center.z - gridRadius); z <= Math.min(this.resolution - 2, center.z + gridRadius); z += 1) {
-      for (let x = Math.max(1, center.x - gridRadius); x <= Math.min(this.resolution - 2, center.x + gridRadius); x += 1) {
+    for (let z = Math.max(1, center.z - gridRadius); z <= Math.min(this.resolutionZ - 2, center.z + gridRadius); z += 1) {
+      for (let x = Math.max(1, center.x - gridRadius); x <= Math.min(this.resolutionX - 2, center.x + gridRadius); x += 1) {
         const position = this.indexToWorld(z * this.resolution + x);
         const distance = Math.hypot(position.x - worldX, position.z - worldZ);
         if (distance >= radius) continue;
@@ -319,11 +342,18 @@ export class TerrainSystem {
   }
 
   heightAt(worldX: number, worldZ: number): number {
-    const half = WORLD_CONFIG.size / 2;
-    const gx = THREE.MathUtils.clamp((worldX + half) / this.cellSize, 0, WORLD_CONFIG.segments);
-    const gz = THREE.MathUtils.clamp((worldZ + half) / this.cellSize, 0, WORLD_CONFIG.segments);
-    const x0 = Math.min(WORLD_CONFIG.segments - 1, Math.floor(gx));
-    const z0 = Math.min(WORLD_CONFIG.segments - 1, Math.floor(gz));
+    const gx = THREE.MathUtils.clamp(
+      (worldX + WORLD_CONFIG.sizeX * 0.5) / this.cellSize,
+      0,
+      WORLD_CONFIG.segmentsX,
+    );
+    const gz = THREE.MathUtils.clamp(
+      (worldZ + WORLD_CONFIG.sizeZ * 0.5) / this.cellSize,
+      0,
+      WORLD_CONFIG.segmentsZ,
+    );
+    const x0 = Math.min(WORLD_CONFIG.segmentsX - 1, Math.floor(gx));
+    const z0 = Math.min(WORLD_CONFIG.segmentsZ - 1, Math.floor(gz));
     const tx = gx - x0;
     const tz = gz - z0;
     const i00 = z0 * this.resolution + x0;
@@ -348,8 +378,11 @@ export class TerrainSystem {
   indexToWorld(index: number): THREE.Vector3 {
     const x = index % this.resolution;
     const z = Math.floor(index / this.resolution);
-    const half = WORLD_CONFIG.size / 2;
-    return new THREE.Vector3(x * this.cellSize - half, this.heights[index], z * this.cellSize - half);
+    return new THREE.Vector3(
+      x * this.cellSize - WORLD_CONFIG.sizeX * 0.5,
+      this.heights[index],
+      z * this.cellSize - WORLD_CONFIG.sizeZ * 0.5,
+    );
   }
 
   /** Return the nearest terrain vertex for a world-space position. */
@@ -359,29 +392,31 @@ export class TerrainSystem {
   }
 
   dispose(): void {
-    this.scene.remove(this.mesh);
+    this.scene.remove(this.mesh, this.backgroundMesh);
     this.scene.remove(this.rockMesh);
     this.mesh.geometry.dispose();
     this.mesh.material.dispose();
+    this.backgroundMesh.geometry.dispose();
+    this.backgroundMesh.material.dispose();
     this.rockMesh.geometry.dispose();
     this.rockMesh.material.dispose();
   }
 
   private worldToGrid(worldX: number, worldZ: number): { x: number; z: number } {
-    const half = WORLD_CONFIG.size / 2;
     return {
-      x: Math.round(THREE.MathUtils.clamp((worldX + half) / this.cellSize, 0, WORLD_CONFIG.segments)),
-      z: Math.round(THREE.MathUtils.clamp((worldZ + half) / this.cellSize, 0, WORLD_CONFIG.segments)),
+      x: Math.round(THREE.MathUtils.clamp((worldX + WORLD_CONFIG.sizeX * 0.5) / this.cellSize, 0, WORLD_CONFIG.segmentsX)),
+      z: Math.round(THREE.MathUtils.clamp((worldZ + WORLD_CONFIG.sizeZ * 0.5) / this.cellSize, 0, WORLD_CONFIG.segmentsZ)),
     };
   }
 
   private rebuildGeometry(): void {
     const verticesPerCell = 6;
-    const positions = new Float32Array(WORLD_CONFIG.segments * WORLD_CONFIG.segments * verticesPerCell * 3);
+    const positions = new Float32Array(WORLD_CONFIG.segmentsX * WORLD_CONFIG.segmentsZ * verticesPerCell * 3);
     const colors = new Float32Array(positions.length);
     const dryColors = new Float32Array(positions.length);
     const wateredColors = new Float32Array(positions.length);
-    const half = WORLD_CONFIG.size / 2;
+    const halfX = WORLD_CONFIG.sizeX * 0.5;
+    const halfZ = WORLD_CONFIG.sizeZ * 0.5;
     let cursor = 0;
     this.greenableCells.fill(0);
     type TerrainPoint = { position: Point; index: number };
@@ -389,13 +424,13 @@ export class TerrainSystem {
     const point = (x: number, z: number): TerrainPoint => {
       const index = z * this.resolution + x;
       return {
-        position: [x * this.cellSize - half, this.heights[index], z * this.cellSize - half],
+        position: [x * this.cellSize - halfX, this.heights[index], z * this.cellSize - halfZ],
         index,
       };
     };
 
-    for (let z = 0; z < WORLD_CONFIG.segments; z += 1) {
-      for (let x = 0; x < WORLD_CONFIG.segments; x += 1) {
+    for (let z = 0; z < WORLD_CONFIG.segmentsZ; z += 1) {
+      for (let x = 0; x < WORLD_CONFIG.segmentsX; x += 1) {
         const p00 = point(x, z);
         const p10 = point(x + 1, z);
         const p01 = point(x, z + 1);
@@ -412,7 +447,7 @@ export class TerrainSystem {
           ];
           const faceColors = this.faceColors(trianglePoints, x, z, triangleIndex);
           if (!faceColors.dry.equals(faceColors.watered)) {
-            this.greenableCells[z * WORLD_CONFIG.segments + x] = 1;
+            this.greenableCells[z * WORLD_CONFIG.segmentsX + x] = 1;
           }
           const color = this.cellIsGreen(x, z) ? faceColors.watered : faceColors.dry;
           for (const vertex of triangle) {
@@ -466,11 +501,73 @@ export class TerrainSystem {
     });
   }
 
+  /** Build the two non-interactive side strips once from the full square map. */
+  private rebuildBackgroundGeometry(): void {
+    const positions: number[] = [];
+    const colors: number[] = [];
+    const half = WORLD_CONFIG.sizeX * 0.5;
+    const zStep = 4;
+    const activeEndZ = this.activeCropStartZ + WORLD_CONFIG.segmentsZ;
+    type BackgroundPoint = { position: Point };
+
+    const point = (x: number, z: number): BackgroundPoint => ({
+      position: [
+        x * this.cellSize - half,
+        this.squareHeights[z * this.resolutionX + x],
+        z * this.cellSize - half,
+      ],
+    });
+
+    const appendStrip = (startZ: number, endZ: number): void => {
+      for (let z = startZ; z < endZ; z += zStep) {
+        const nextZ = Math.min(endZ, z + zStep);
+        for (let x = 0; x < WORLD_CONFIG.segmentsX; x += 1) {
+          const p00 = point(x, z);
+          const p10 = point(x + 1, z);
+          const p01 = point(x, nextZ);
+          const p11 = point(x + 1, nextZ);
+          const triangles: [BackgroundPoint, BackgroundPoint, BackgroundPoint][] = (x + z) % 2 === 0
+            ? [[p00, p01, p10], [p10, p01, p11]]
+            : [[p00, p01, p11], [p00, p11, p10]];
+
+          triangles.forEach((triangle, triangleIndex) => {
+            const trianglePoints: [Point, Point, Point] = [
+              triangle[0].position,
+              triangle[1].position,
+              triangle[2].position,
+            ];
+            const color = this.faceColors(trianglePoints, x, z, triangleIndex).watered;
+            for (const vertex of triangle) {
+              positions.push(...vertex.position);
+              colors.push(color.r, color.g, color.b);
+            }
+          });
+        }
+      }
+    };
+
+    appendStrip(0, this.activeCropStartZ);
+    appendStrip(activeEndZ, WORLD_CONFIG.segmentsX);
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+    if (positions.length > 0) {
+      geometry.computeVertexNormals();
+      geometry.computeBoundingBox();
+      geometry.computeBoundingSphere();
+    }
+    this.backgroundMesh.geometry.dispose();
+    this.backgroundMesh.geometry = geometry;
+    this.backgroundMesh.visible = positions.length > 0;
+  }
+
   /** Rebuild every stroke/component as one self-contained, coarse faceted boulder. */
   private rebuildRockBodies(): void {
     const positions: number[] = [];
     const colors: number[] = [];
-    const half = WORLD_CONFIG.size * 0.5;
+    const halfX = WORLD_CONFIG.sizeX * 0.5;
+    const halfZ = WORLD_CONFIG.sizeZ * 0.5;
     let faceIndex = 0;
     this.rockSurfaceHeights.fill(Number.NaN);
 
@@ -499,8 +596,8 @@ export class TerrainSystem {
     for (const component of this.collectRockComponents()) {
       const surfaceFaces: Array<[Point, Point, Point]> = [];
       const samples = component.indices.map((index) => ({
-        x: (index % this.resolution) * this.cellSize - half,
-        z: Math.floor(index / this.resolution) * this.cellSize - half,
+        x: (index % this.resolution) * this.cellSize - halfX,
+        z: Math.floor(index / this.resolution) * this.cellSize - halfZ,
       }));
       let hull = this.convexHull(samples);
       if (hull.length < 3) continue;
@@ -520,8 +617,8 @@ export class TerrainSystem {
         // so the coarse stone mesh and neighboring terrain meet at one contour.
         const expansion = this.cellSize * (0.46 + irregularity * 0.08);
         return {
-          x: THREE.MathUtils.clamp(point.x + (dx / length) * expansion, -half + 0.02, half - 0.02),
-          z: THREE.MathUtils.clamp(point.z + (dz / length) * expansion, -half + 0.02, half - 0.02),
+          x: THREE.MathUtils.clamp(point.x + (dx / length) * expansion, -halfX + 0.02, halfX - 0.02),
+          z: THREE.MathUtils.clamp(point.z + (dz / length) * expansion, -halfZ + 0.02, halfZ - 0.02),
         };
       });
 
@@ -607,16 +704,17 @@ export class TerrainSystem {
     minWorldZ: number,
     maxWorldZ: number,
   ): void {
-    const half = WORLD_CONFIG.size * 0.5;
-    const startX = THREE.MathUtils.clamp(Math.floor((minWorldX + half) / this.cellSize) - 1, 0, this.resolution - 1);
-    const endX = THREE.MathUtils.clamp(Math.ceil((maxWorldX + half) / this.cellSize) + 1, 0, this.resolution - 1);
-    const startZ = THREE.MathUtils.clamp(Math.floor((minWorldZ + half) / this.cellSize) - 1, 0, this.resolution - 1);
-    const endZ = THREE.MathUtils.clamp(Math.ceil((maxWorldZ + half) / this.cellSize) + 1, 0, this.resolution - 1);
+    const halfX = WORLD_CONFIG.sizeX * 0.5;
+    const halfZ = WORLD_CONFIG.sizeZ * 0.5;
+    const startX = THREE.MathUtils.clamp(Math.floor((minWorldX + halfX) / this.cellSize) - 1, 0, this.resolutionX - 1);
+    const endX = THREE.MathUtils.clamp(Math.ceil((maxWorldX + halfX) / this.cellSize) + 1, 0, this.resolutionX - 1);
+    const startZ = THREE.MathUtils.clamp(Math.floor((minWorldZ + halfZ) / this.cellSize) - 1, 0, this.resolutionZ - 1);
+    const endZ = THREE.MathUtils.clamp(Math.ceil((maxWorldZ + halfZ) / this.cellSize) + 1, 0, this.resolutionZ - 1);
 
     for (let z = startZ; z <= endZ; z += 1) {
       for (let x = startX; x <= endX; x += 1) {
-        const worldX = x * this.cellSize - half;
-        const worldZ = z * this.cellSize - half;
+        const worldX = x * this.cellSize - halfX;
+        const worldZ = z * this.cellSize - halfZ;
         let surface = Number.NEGATIVE_INFINITY;
         for (const face of faces) {
           const sampled = this.triangleHeightAt(worldX, worldZ, face);
@@ -664,7 +762,7 @@ export class TerrainSystem {
             if (dx === 0 && dz === 0) continue;
             const nx = x + dx;
             const nz = z + dz;
-            if (nx < 0 || nz < 0 || nx >= this.resolution || nz >= this.resolution) continue;
+            if (nx < 0 || nz < 0 || nx >= this.resolutionX || nz >= this.resolutionZ) continue;
             const neighbor = nz * this.resolution + nx;
             if (visited[neighbor] !== 0 || this.rockPaint[neighbor] === 0 || this.rockGroups[neighbor] !== group) continue;
             visited[neighbor] = 1;
@@ -759,7 +857,7 @@ export class TerrainSystem {
             if (dx === 0 && dz === 0) continue;
             const nx = x + dx;
             const nz = z + dz;
-            if (nx < 0 || nz < 0 || nx >= this.resolution || nz >= this.resolution) continue;
+            if (nx < 0 || nz < 0 || nx >= this.resolutionX || nz >= this.resolutionZ) continue;
             const neighbor = nz * this.resolution + nx;
             if (visited[neighbor] !== 0 || this.rockPaint[neighbor] === 0 || this.rockGroups[neighbor] !== 0) continue;
             visited[neighbor] = 1;
@@ -788,9 +886,9 @@ export class TerrainSystem {
     const hull = this.convexHull(points);
     if (hull.length < 3) return;
     const minX = Math.max(0, Math.floor(Math.min(...hull.map((point) => point.x))));
-    const maxX = Math.min(this.resolution - 1, Math.ceil(Math.max(...hull.map((point) => point.x))));
+    const maxX = Math.min(this.resolutionX - 1, Math.ceil(Math.max(...hull.map((point) => point.x))));
     const minZ = Math.max(0, Math.floor(Math.min(...hull.map((point) => point.z))));
-    const maxZ = Math.min(this.resolution - 1, Math.ceil(Math.max(...hull.map((point) => point.z))));
+    const maxZ = Math.min(this.resolutionZ - 1, Math.ceil(Math.max(...hull.map((point) => point.z))));
 
     for (let z = minZ; z <= maxZ; z += 1) {
       for (let x = minX; x <= maxX; x += 1) {
@@ -816,7 +914,8 @@ export class TerrainSystem {
   /** Shape the real simulation height field into a low, coherent stone cap. */
   private sculptRockGroupHeight(group: number): void {
     const indices: number[] = [];
-    const half = WORLD_CONFIG.size * 0.5;
+    const halfX = WORLD_CONFIG.sizeX * 0.5;
+    const halfZ = WORLD_CONFIG.sizeZ * 0.5;
     let meanX = 0;
     let meanZ = 0;
     let meanHeight = 0;
@@ -828,8 +927,8 @@ export class TerrainSystem {
     for (let index = 0; index < this.rockGroups.length; index += 1) {
       if (this.rockPaint[index] === 0 || this.rockGroups[index] !== group) continue;
       indices.push(index);
-      const x = (index % this.resolution) * this.cellSize - half;
-      const z = Math.floor(index / this.resolution) * this.cellSize - half;
+      const x = (index % this.resolution) * this.cellSize - halfX;
+      const z = Math.floor(index / this.resolution) * this.cellSize - halfZ;
       meanX += x;
       meanZ += z;
       meanHeight += this.heights[index];
@@ -851,8 +950,8 @@ export class TerrainSystem {
     let xh = 0;
     let zh = 0;
     for (const index of indices) {
-      const x = (index % this.resolution) * this.cellSize - half - meanX;
-      const z = Math.floor(index / this.resolution) * this.cellSize - half - meanZ;
+      const x = (index % this.resolution) * this.cellSize - halfX - meanX;
+      const z = Math.floor(index / this.resolution) * this.cellSize - halfZ - meanZ;
       const height = this.heights[index] - meanHeight;
       xx += x * x;
       zz += z * z;
@@ -880,7 +979,7 @@ export class TerrainSystem {
         for (let dx = -searchRadius; dx <= searchRadius; dx += 1) {
           const x = gridX + dx;
           const z = gridZ + dz;
-          const outside = x < 0 || z < 0 || x >= this.resolution || z >= this.resolution;
+          const outside = x < 0 || z < 0 || x >= this.resolutionX || z >= this.resolutionZ;
           if (!outside) {
             const neighbor = z * this.resolution + x;
             if (this.rockPaint[neighbor] !== 0 && this.rockGroups[neighbor] === group) continue;
@@ -891,8 +990,8 @@ export class TerrainSystem {
 
       const normalized = THREE.MathUtils.clamp((nearestEdge - 0.5) / 3, 0, 1);
       const profile = normalized * normalized * (3 - 2 * normalized);
-      const worldX = gridX * this.cellSize - half;
-      const worldZ = gridZ * this.cellSize - half;
+      const worldX = gridX * this.cellSize - halfX;
+      const worldZ = gridZ * this.cellSize - halfZ;
       const planeHeight = meanHeight + slopeX * (worldX - meanX) + slopeZ * (worldZ - meanZ);
       const targetHeight = planeHeight + capHeight * profile;
       this.heights[index] = THREE.MathUtils.lerp(this.heights[index], targetHeight, profile);
@@ -914,7 +1013,7 @@ export class TerrainSystem {
         for (let dx = -radius; dx <= radius; dx += 1) {
           const x = gridX + dx;
           const z = gridZ + dz;
-          const outside = x < 0 || z < 0 || x >= this.resolution || z >= this.resolution;
+          const outside = x < 0 || z < 0 || x >= this.resolutionX || z >= this.resolutionZ;
           if (!outside && this.rockPaint[z * this.resolution + x] !== 0) continue;
           nearestOpenGround = Math.min(nearestOpenGround, Math.hypot(dx, dz));
         }
@@ -937,22 +1036,22 @@ export class TerrainSystem {
     const normal = edgeA.cross(edgeB).normalize();
     const slope = 1 - Math.max(0, normal.y);
     const height = (a[1] + b[1] + c[1]) / 3;
-    const normalizedX = ((x + 0.5) / WORLD_CONFIG.segments) * 2 - 1;
+    const normalizedX = ((x + 0.5) / WORLD_CONFIG.segmentsX) * 2 - 1;
     const normalizedHeight = THREE.MathUtils.clamp((height - this.minHeight) / Math.max(1, this.maxHeight - this.minHeight), 0, 1);
     const variation = 0.91 + hash2D(x * 2 + triangleIndex, z, this.seedHash) * 0.16;
     let base: string = TERRAIN_PALETTE.meadow;
     let wateredBase: string = WATERED_TERRAIN_PALETTE.meadow;
 
-    if (normalizedX > 0.5 && height < WORLD_CONFIG.seaLevel - 0.2) {
+    if (normalizedX > 0.5 && height < scaledWorldHeight(WORLD_CONFIG.seaLevel - 0.2)) {
       base = TERRAIN_PALETTE.seabed;
       wateredBase = base;
-    } else if (normalizedX > 0.48 && height < 0.18) {
+    } else if (normalizedX > 0.48 && height < scaledWorldHeight(0.18)) {
       base = TERRAIN_PALETTE.wetSand;
       wateredBase = base;
-    } else if (normalizedX > 0.45 && height < 0.95) {
+    } else if (normalizedX > 0.45 && height < scaledWorldHeight(0.95)) {
       base = TERRAIN_PALETTE.sand;
       wateredBase = base;
-    } else if (height < 0.6) {
+    } else if (height < scaledWorldHeight(0.6)) {
       base = TERRAIN_PALETTE.valley;
       wateredBase = WATERED_TERRAIN_PALETTE.valley;
     } else if (normalizedHeight < 0.31) {
@@ -980,14 +1079,6 @@ export class TerrainSystem {
     };
   }
 
-  private cellIsGreen(x: number, z: number): boolean {
-    const topLeft = z * this.resolution + x;
-    return this.vertexIsGreen(topLeft)
-      || this.vertexIsGreen(topLeft + 1)
-      || this.vertexIsGreen(topLeft + this.resolution)
-      || this.vertexIsGreen(topLeft + this.resolution + 1);
-  }
-
   private cellHasPermanentGreen(x: number, z: number): boolean {
     const topLeft = z * this.resolution + x;
     return this.permanentlyGreen[topLeft] !== 0
@@ -1012,15 +1103,22 @@ export class TerrainSystem {
       && this.rockPaint[topLeft + this.resolution + 1] !== 0;
   }
 
+  private cellIsGreen(x: number, z: number): boolean {
+    const topLeft = z * this.resolution + x;
+    return this.vertexIsGreen(topLeft)
+      || this.vertexIsGreen(topLeft + 1)
+      || this.vertexIsGreen(topLeft + this.resolution)
+      || this.vertexIsGreen(topLeft + this.resolution + 1);
+  }
+
   private refreshTerrainColors(): void {
     const attribute = this.mesh.geometry.getAttribute("color") as THREE.BufferAttribute | undefined;
     if (!attribute || this.dryColors.length !== attribute.array.length) return;
     const colors = attribute.array as Float32Array;
     const valuesPerCell = 18;
     let cursor = 0;
-
-    for (let z = 0; z < WORLD_CONFIG.segments; z += 1) {
-      for (let x = 0; x < WORLD_CONFIG.segments; x += 1) {
+    for (let z = 0; z < WORLD_CONFIG.segmentsZ; z += 1) {
+      for (let x = 0; x < WORLD_CONFIG.segmentsX; x += 1) {
         const source = this.cellIsGreen(x, z) ? this.wateredColors : this.dryColors;
         for (let i = 0; i < valuesPerCell; i += 1) colors[cursor + i] = source[cursor + i];
         cursor += valuesPerCell;
@@ -1047,8 +1145,8 @@ export class TerrainSystem {
       ? (this.activeRockGroupId || this.nextRockGroupId++)
       : 0;
 
-    for (let z = Math.max(0, center.z - gridRadius); z <= Math.min(this.resolution - 1, center.z + gridRadius); z += 1) {
-      for (let x = Math.max(0, center.x - gridRadius); x <= Math.min(this.resolution - 1, center.x + gridRadius); x += 1) {
+    for (let z = Math.max(0, center.z - gridRadius); z <= Math.min(this.resolutionZ - 1, center.z + gridRadius); z += 1) {
+      for (let x = Math.max(0, center.x - gridRadius); x <= Math.min(this.resolutionX - 1, center.x + gridRadius); x += 1) {
         const index = z * this.resolution + x;
         const position = this.indexToWorld(index);
         if (Math.hypot(position.x - worldX, position.z - worldZ) >= radius) continue;

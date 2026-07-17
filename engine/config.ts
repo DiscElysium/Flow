@@ -1,14 +1,28 @@
 export const WORLD_CONFIG = {
+  /** Legacy feature scale used for brush/effect sizing. */
   size: 188,
+  /** Mountain-to-sea world length: twice the former square map. */
+  sizeX: 376,
+  /** Cross-valley width: two thirds of the former square map. */
+  sizeZ: 125.33333333333333,
   segments: 168,
-  minHeight: -5,
-  maxHeight: 78,
+  /** Real rectangular grid dimensions; every cell remains square. */
+  segmentsX: 336,
+  segmentsZ: 112,
+  /** Vertical relief is scaled around sea level after terrain generation. */
+  verticalScale: 3,
+  baseMinHeight: -5,
+  baseMaxHeight: 78,
+  minHeight: -14.64,
+  maxHeight: 234.36,
   seaLevel: -0.18,
   brush: {
     radius: 3.2,
     strength: 5.4,
     minRadius: 1.2,
-    maxRadius: 8,
+    maxRadius: 16,
+    minStrength: 1,
+    maxStrength: 20,
   },
   water: {
     sourceRate: 0.8,
@@ -23,9 +37,9 @@ export const WORLD_CONFIG = {
     fov: 43,
     // 提高近裁面以增加深度缓冲精度，减少水面与地表之间的闪线。
     near: 0.5,
-    far: 620,
-    position: [132, 104, 156] as [number, number, number],
-    target: [-8, 8, 0] as [number, number, number],
+    far: 1600,
+    position: [278, 342, 238] as [number, number, number],
+    target: [-22, 24, 0] as [number, number, number],
   },
 } as const;
 

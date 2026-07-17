@@ -55,6 +55,7 @@ button { color: inherit; }
 .world-canvas canvas[data-tool="paint-yellow"],
 .world-canvas canvas[data-tool="paint-rock"] { cursor: crosshair; }
 .world-canvas canvas[data-source-placement="active"] { cursor: cell; }
+.world-canvas canvas[data-camera-drag] { cursor: grabbing; }
 
 .source-placement-tip {
   position: absolute;
@@ -86,6 +87,137 @@ button { color: inherit; }
   opacity: 0.16;
   mix-blend-mode: soft-light;
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.42'/%3E%3C/svg%3E");
+}
+
+.title-cover {
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  width: 100%;
+  height: 100%;
+  padding: 32px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  background: #d7e0d8;
+  color: rgba(245, 248, 241, .94);
+  text-align: center;
+  cursor: pointer;
+  isolation: isolate;
+}
+
+.title-cover::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg, rgba(41, 62, 54, .08) 0%, transparent 24%, transparent 55%, rgba(27, 45, 38, .34) 100%),
+    radial-gradient(ellipse at 50% 46%, rgba(235, 241, 233, .08), transparent 48%);
+}
+
+.title-cover::after {
+  content: "";
+  position: absolute;
+  inset: auto -8% -17%;
+  z-index: 1;
+  height: 35%;
+  pointer-events: none;
+  border-radius: 50% 50% 0 0;
+  background: linear-gradient(180deg, rgba(210, 222, 214, 0), rgba(33, 53, 45, .18));
+  filter: blur(12px);
+}
+
+.title-cover-mountain {
+  z-index: 0;
+  transform: scale(1.025);
+}
+
+.title-cover-kicker,
+.title-cover-word,
+.title-cover-current,
+.title-cover-prompt {
+  z-index: 2;
+}
+
+.title-cover-kicker {
+  margin-bottom: clamp(24px, 4vh, 46px);
+  font-family: var(--font-geist-mono), monospace;
+  font-size: clamp(8px, .72vw, 11px);
+  font-weight: 600;
+  letter-spacing: .42em;
+  color: rgba(244, 248, 240, .88);
+  text-shadow: 0 2px 20px rgba(25, 43, 36, .34);
+  opacity: .82;
+  animation: title-cover-rise .9s .1s both cubic-bezier(.2, .75, .25, 1);
+}
+
+.title-cover-word {
+  padding-right: .08em;
+  font-family: var(--font-geist-sans), Arial, sans-serif;
+  font-size: clamp(108px, 20vw, 300px);
+  font-weight: 900;
+  line-height: .7;
+  letter-spacing: -.105em;
+  color: rgba(247, 249, 243, .94);
+  text-shadow: 0 16px 64px rgba(18, 37, 30, .34), 0 2px 8px rgba(22, 40, 33, .18);
+  animation: title-cover-rise 1s both cubic-bezier(.2, .75, .25, 1);
+}
+
+.title-cover-current {
+  position: relative;
+  width: min(440px, 48vw);
+  height: 1px;
+  margin: clamp(34px, 5vh, 58px) 0 20px;
+  overflow: hidden;
+  background: rgba(241, 247, 240, .3);
+}
+
+.title-cover-current i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 38%;
+  background: linear-gradient(90deg, transparent, rgba(199, 237, 229, .95), transparent);
+  animation: title-cover-flow 2.4s ease-in-out infinite;
+}
+
+.title-cover-prompt {
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: .25em;
+  color: rgba(248, 250, 244, .92);
+  text-shadow: 0 2px 16px rgba(21, 40, 33, .42);
+  opacity: .82;
+  animation: title-cover-pulse 2s ease-in-out infinite;
+}
+
+.title-cover:focus-visible { outline: 2px solid rgba(209, 238, 230, .88); outline-offset: -8px; }
+.title-cover.is-closing { cursor: default; animation: title-cover-exit .46s ease forwards; }
+
+@keyframes title-cover-rise {
+  from { opacity: 0; transform: translateY(24px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes title-cover-flow {
+  from { transform: translateX(-120%); }
+  to { transform: translateX(360%); }
+}
+
+@keyframes title-cover-pulse {
+  0%, 100% { opacity: .48; }
+  50% { opacity: .9; }
+}
+
+@keyframes title-cover-exit {
+  to { opacity: 0; transform: scale(1.025); }
 }
 
 .glass-panel {
@@ -355,9 +487,36 @@ button { color: inherit; }
   right: 26px;
   top: 112px;
   width: 248px;
+  max-height: calc(100svh - 182px);
   padding: 17px;
+  overflow-y: auto;
+  scrollbar-width: thin;
   border-radius: 7px;
 }
+
+.terrain-readout.is-collapsed {
+  width: 42px;
+  height: 42px;
+  min-height: 42px;
+  padding: 0;
+  overflow: hidden;
+  border-radius: 10px;
+}
+
+.readout-expand-button {
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: #47675a;
+  cursor: pointer;
+  transition: background 160ms ease, color 160ms ease;
+}
+
+.readout-expand-button:hover { background: rgba(255, 255, 255, .3); color: #294d40; }
 
 .readout-heading {
   padding-bottom: 12px;
@@ -372,6 +531,23 @@ button { color: inherit; }
 
 .readout-heading > span { display: flex; align-items: center; gap: 7px; }
 .readout-heading b { color: #628474; font-size: 7px; }
+.readout-heading .readout-heading-actions { gap: 5px; }
+
+.readout-collapse-button {
+  width: 25px;
+  height: 25px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(41, 69, 58, .12);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .2);
+  color: #5c746a;
+  cursor: pointer;
+  transition: background 160ms ease, color 160ms ease;
+}
+
+.readout-collapse-button:hover { background: rgba(255, 255, 255, .52); color: #315649; }
 
 .terrain-readout dl { margin: 7px 0 15px; }
 .terrain-readout dl div {
@@ -747,6 +923,10 @@ input:disabled { cursor: not-allowed !important; opacity: .42; }
 
 @media (max-width: 680px) {
   .lab-shell { min-height: 540px; }
+  .title-cover { padding: 24px; }
+  .title-cover-kicker { letter-spacing: .24em; }
+  .title-cover-word { font-size: clamp(88px, 28vw, 190px); }
+  .title-cover-current { width: 72vw; }
   .topbar { top: 10px; left: 10px; right: 10px; height: 56px; padding-left: 12px; }
   .brand small, .seed-chip { display: none; }
   .watered-progress { top: 83px; left: 14px; font-size: clamp(44px, 14vw, 60px); }

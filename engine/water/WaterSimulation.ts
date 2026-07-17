@@ -11,7 +11,7 @@ const VISUAL_WET_EXIT_DEPTH = 0.000005;
 const VISUAL_COVERAGE_FULL_DEPTH = VISUAL_WET_ENTER_DEPTH * 4.5;
 const RESIDUAL_WATER_DEPTH = 0.00004;
 const MIN_TRANSFER_DEPTH = 0.000001;
-const COVERABLE_BUMP_HEIGHT = 1.25;
+const COVERABLE_BUMP_HEIGHT = 1.25 * WORLD_CONFIG.verticalScale;
 const GRAVITY_PRIORITY_START = 0.035;
 const GRAVITY_PRIORITY_FULL = 0.48;
 const FLOW_DROP_LOOKAHEAD_CELLS = 5;
@@ -21,8 +21,10 @@ const MIN_VISUAL_WATER_DEPTH = 0.012;
 export class WaterSimulation {
   readonly mesh: THREE.Mesh<THREE.BufferGeometry, THREE.ShaderMaterial>;
 
-  private readonly resolution = WORLD_CONFIG.segments + 1;
-  private readonly depth = new Float32Array(this.resolution * this.resolution);
+  private readonly resolutionX = WORLD_CONFIG.segmentsX + 1;
+  private readonly resolutionZ = WORLD_CONFIG.segmentsZ + 1;
+  private readonly resolution = this.resolutionX;
+  private readonly depth = new Float32Array(this.resolutionX * this.resolutionZ);
   private readonly delta = new Float32Array(this.depth.length);
   private readonly previousTerrain = new Float32Array(this.depth.length);
   /**
@@ -39,7 +41,6 @@ export class WaterSimulation {
   private readonly turbulence = new Float32Array(this.depth.length);
   private readonly foam = new Float32Array(this.depth.length);
   private readonly lakeFactor = new Float32Array(this.depth.length);
-  private readonly shoreFactor = new Float32Array(this.depth.length);
   /** 单帧交换累计量，用完后会写入上面的平滑状态场。 */
   private readonly flowAccumX = new Float32Array(this.depth.length);
   private readonly flowAccumZ = new Float32Array(this.depth.length);
@@ -58,13 +59,6 @@ export class WaterSimulation {
   /** 最终交给独立水网格的高度；岸边支撑点从邻近水面继承高度，不再沿山体爬升。 */
   private readonly renderSurfaceHeight = new Float32Array(this.depth.length);
   private readonly visualCoverageTexture: THREE.DataTexture;
-  private readonly depthAttribute: THREE.BufferAttribute;
-  private readonly flowAttribute: THREE.BufferAttribute;
-  private readonly flowSpeedAttribute: THREE.BufferAttribute;
-  private readonly turbulenceAttribute: THREE.BufferAttribute;
-  private readonly foamAttribute: THREE.BufferAttribute;
-  private readonly lakeAttribute: THREE.BufferAttribute;
-  private readonly shoreAttribute: THREE.BufferAttribute;
   private readonly renderSystem: WaterRenderSystem;
   private readonly marker = new THREE.Group();
   private renderRefreshElapsed = 0;
@@ -76,18 +70,11 @@ export class WaterSimulation {
     private readonly terrain: TerrainSystem,
   ) {
     const geometry = this.createGeometry();
-    this.depthAttribute = geometry.getAttribute("aDepth") as THREE.BufferAttribute;
-    this.flowAttribute = geometry.getAttribute("aFlow") as THREE.BufferAttribute;
-    this.flowSpeedAttribute = geometry.getAttribute("aFlowSpeed") as THREE.BufferAttribute;
-    this.turbulenceAttribute = geometry.getAttribute("aTurbulence") as THREE.BufferAttribute;
-    this.foamAttribute = geometry.getAttribute("aFoam") as THREE.BufferAttribute;
-    this.lakeAttribute = geometry.getAttribute("aLake") as THREE.BufferAttribute;
-    this.shoreAttribute = geometry.getAttribute("aShore") as THREE.BufferAttribute;
     this.waterfallTarget.fill(-1);
     this.visualCoverageTexture = new THREE.DataTexture(
       this.visualCoveragePixels,
-      this.resolution,
-      this.resolution,
+      this.resolutionX,
+      this.resolutionZ,
       THREE.RedFormat,
       THREE.UnsignedByteType,
     );
@@ -112,7 +99,7 @@ export class WaterSimulation {
         uShallowDepth: { value: 0.04 },
         uDeepDepth: { value: 2.5 },
         uTime: { value: 0.0 },
-        uWorldSize: { value: WORLD_CONFIG.size },
+        uWorldSize: { value: new THREE.Vector2(WORLD_CONFIG.sizeX, WORLD_CONFIG.sizeZ) },
         uVisualCoverage: { value: this.visualCoverageTexture },
       },
       vertexShader: `
@@ -154,7 +141,7 @@ export class WaterSimulation {
         uniform float uShallowDepth;
         uniform float uMidDepth;
         uniform float uDeepDepth;
-        uniform float uWorldSize;
+        uniform vec2 uWorldSize;
         uniform sampler2D uVisualCoverage;
 
         varying float vDepth;
@@ -218,11 +205,11 @@ export class WaterSimulation {
       this.recentInflow[this.sourceIndex] += sourceAdded;
 
       this.delta.fill(0);
-      for (let z = 0; z < this.resolution; z += 1) {
-        for (let x = 0; x < this.resolution; x += 1) {
+      for (let z = 0; z < this.resolutionZ; z += 1) {
+        for (let x = 0; x < this.resolutionX; x += 1) {
           const index = z * this.resolution + x;
-          if (x < this.resolution - 1) this.exchange(index, index + 1);
-          if (z < this.resolution - 1) this.exchange(index, index + this.resolution);
+          if (x < this.resolutionX - 1) this.exchange(index, index + 1);
+          if (z < this.resolutionZ - 1) this.exchange(index, index + this.resolution);
         }
       }
       for (let i = 0; i < this.depth.length; i += 1) {
@@ -347,11 +334,10 @@ export class WaterSimulation {
 
   /** 查询任意世界坐标的水深（双线性插值），供外部系统查询 */
   depthAt(worldX: number, worldZ: number): number {
-    const half = WORLD_CONFIG.size / 2;
-    const fx = (worldX + half) / this.terrain.cellSize;
-    const fz = (worldZ + half) / this.terrain.cellSize;
-    const x0 = Math.max(0, Math.min(this.resolution - 2, Math.floor(fx)));
-    const z0 = Math.max(0, Math.min(this.resolution - 2, Math.floor(fz)));
+    const fx = (worldX + WORLD_CONFIG.sizeX * 0.5) / this.terrain.cellSize;
+    const fz = (worldZ + WORLD_CONFIG.sizeZ * 0.5) / this.terrain.cellSize;
+    const x0 = Math.max(0, Math.min(this.resolutionX - 2, Math.floor(fx)));
+    const z0 = Math.max(0, Math.min(this.resolutionZ - 2, Math.floor(fz)));
     const tx = fx - x0;
     const tz = fz - z0;
     const idx = (z0: number, x0: number) => z0 * this.resolution + x0;
@@ -376,10 +362,10 @@ export class WaterSimulation {
 
       for (let dz = -radiusInCells; dz <= radiusInCells; dz += 1) {
         const z = waterZ + dz;
-        if (z < 0 || z >= this.resolution) continue;
+        if (z < 0 || z >= this.resolutionZ) continue;
         for (let dx = -radiusInCells; dx <= radiusInCells; dx += 1) {
           const x = waterX + dx;
-          if (x < 0 || x >= this.resolution) continue;
+          if (x < 0 || x >= this.resolutionX) continue;
           const distanceSquared = (dx * dx + dz * dz) * this.terrain.cellSize * this.terrain.cellSize;
           if (distanceSquared <= radiusSquared) target[z * this.resolution + x] = 1;
         }
@@ -458,9 +444,9 @@ export class WaterSimulation {
       }
     };
     if (x > 0) consider(from - 1);
-    if (x < this.resolution - 1) consider(from + 1);
+    if (x < this.resolutionX - 1) consider(from + 1);
     if (z > 0) consider(from - this.resolution);
-    if (z < this.resolution - 1) consider(from + this.resolution);
+    if (z < this.resolutionZ - 1) consider(from + this.resolution);
 
     const gravityStrength = THREE.MathUtils.smoothstep(
       steepestDrop,
@@ -503,9 +489,9 @@ export class WaterSimulation {
     // A monotonic hillside has a higher sample on one side and is preserved.
     // A small spike or one-cell ridge has lower terrain on both opposite sides
     // and is treated as sub-grid roughness, including diagonal ridges.
-    if (x > 0 && x < this.resolution - 1) considerOppositePair(index - 1, index + 1);
-    if (z > 0 && z < this.resolution - 1) considerOppositePair(index - this.resolution, index + this.resolution);
-    if (x > 0 && x < this.resolution - 1 && z > 0 && z < this.resolution - 1) {
+    if (x > 0 && x < this.resolutionX - 1) considerOppositePair(index - 1, index + 1);
+    if (z > 0 && z < this.resolutionZ - 1) considerOppositePair(index - this.resolution, index + this.resolution);
+    if (x > 0 && x < this.resolutionX - 1 && z > 0 && z < this.resolutionZ - 1) {
       considerOppositePair(index - this.resolution - 1, index + this.resolution + 1);
       considerOppositePair(index - this.resolution + 1, index + this.resolution - 1);
     }
@@ -604,7 +590,6 @@ export class WaterSimulation {
       );
 
       const shore = wet && this.hasDryNeighbor(index) ? 1 : 0;
-      this.shoreFactor[index] = THREE.MathUtils.lerp(this.shoreFactor[index], shore, directionResponse);
       const rawTurbulence = effectWet
         ? THREE.MathUtils.clamp(
           rawDropEnergy * 0.66
@@ -652,7 +637,7 @@ export class WaterSimulation {
     for (let cells = 1; cells <= FLOW_DROP_LOOKAHEAD_CELLS; cells += 1) {
       const targetX = Math.round(x + dx * cells);
       const targetZ = Math.round(z + dz * cells);
-      if (targetX < 0 || targetX >= this.resolution || targetZ < 0 || targetZ >= this.resolution) break;
+      if (targetX < 0 || targetX >= this.resolutionX || targetZ < 0 || targetZ >= this.resolutionZ) break;
       const target = targetZ * this.resolution + targetX;
       if (target === previousTarget) continue;
       previousTarget = target;
@@ -685,7 +670,7 @@ export class WaterSimulation {
     for (const sign of [-1, 1]) {
       const sampleX = x + sideX * sign;
       const sampleZ = z + sideZ * sign;
-      if (sampleX < 0 || sampleX >= this.resolution || sampleZ < 0 || sampleZ >= this.resolution) continue;
+      if (sampleX < 0 || sampleX >= this.resolutionX || sampleZ < 0 || sampleZ >= this.resolutionZ) continue;
       const sample = sampleZ * this.resolution + sampleX;
       if (this.depth[sample] <= VISUAL_WET_EXIT_DEPTH) continue;
       surface += this.getFlowSurface(sample) * 0.5;
@@ -698,9 +683,9 @@ export class WaterSimulation {
     const x = index % this.resolution;
     const z = Math.floor(index / this.resolution);
     if (x > 0 && this.depth[index - 1] <= MIN_VISIBLE_DEPTH) return true;
-    if (x < this.resolution - 1 && this.depth[index + 1] <= MIN_VISIBLE_DEPTH) return true;
+    if (x < this.resolutionX - 1 && this.depth[index + 1] <= MIN_VISIBLE_DEPTH) return true;
     if (z > 0 && this.depth[index - this.resolution] <= MIN_VISIBLE_DEPTH) return true;
-    if (z < this.resolution - 1 && this.depth[index + this.resolution] <= MIN_VISIBLE_DEPTH) return true;
+    if (z < this.resolutionZ - 1 && this.depth[index + this.resolution] <= MIN_VISIBLE_DEPTH) return true;
     return false;
   }
 
@@ -712,7 +697,6 @@ export class WaterSimulation {
     this.turbulence.fill(0);
     this.foam.fill(0);
     this.lakeFactor.fill(0);
-    this.shoreFactor.fill(0);
     this.waterfallEnergy.fill(0);
     this.waterfallTarget.fill(-1);
     this.resetFrameAccumulators();
@@ -722,18 +706,19 @@ export class WaterSimulation {
     const positions = new Float32Array(this.depth.length * 3);
     const depthValues = new Float32Array(this.depth.length);
     const indices: number[] = [];
-    const half = WORLD_CONFIG.size / 2;
+    const halfX = WORLD_CONFIG.sizeX * 0.5;
+    const halfZ = WORLD_CONFIG.sizeZ * 0.5;
 
-    for (let z = 0; z < this.resolution; z += 1) {
-      for (let x = 0; x < this.resolution; x += 1) {
+    for (let z = 0; z < this.resolutionZ; z += 1) {
+      for (let x = 0; x < this.resolutionX; x += 1) {
         const index = z * this.resolution + x;
-        positions[index * 3] = x * this.terrain.cellSize - half;
+        positions[index * 3] = x * this.terrain.cellSize - halfX;
         positions[index * 3 + 1] = this.terrain.heights[index] - 0.06;
-        positions[index * 3 + 2] = z * this.terrain.cellSize - half;
+        positions[index * 3 + 2] = z * this.terrain.cellSize - halfZ;
       }
     }
-    for (let z = 0; z < WORLD_CONFIG.segments; z += 1) {
-      for (let x = 0; x < WORLD_CONFIG.segments; x += 1) {
+    for (let z = 0; z < WORLD_CONFIG.segmentsZ; z += 1) {
+      for (let x = 0; x < WORLD_CONFIG.segmentsX; x += 1) {
         const a = z * this.resolution + x;
         const b = a + 1;
         const c = a + this.resolution;
@@ -779,9 +764,9 @@ export class WaterSimulation {
       if (targetCoverage === 0 && this.visualCoverageRaw[index] < 0.001) this.visualCoverageRaw[index] = 0;
     }
 
-    for (let z = 0; z < this.resolution; z += 1) {
+    for (let z = 0; z < this.resolutionZ; z += 1) {
       const row = z * this.resolution;
-      for (let x = 0; x < this.resolution; x += 1) {
+      for (let x = 0; x < this.resolutionX; x += 1) {
         const index = row + x;
         const left = row + Math.max(0, x - 1);
         const right = row + Math.min(this.resolution - 1, x + 1);
@@ -793,11 +778,11 @@ export class WaterSimulation {
       }
     }
 
-    for (let z = 0; z < this.resolution; z += 1) {
+    for (let z = 0; z < this.resolutionZ; z += 1) {
       const previousRow = Math.max(0, z - 1) * this.resolution;
       const row = z * this.resolution;
-      const nextRow = Math.min(this.resolution - 1, z + 1) * this.resolution;
-      for (let x = 0; x < this.resolution; x += 1) {
+      const nextRow = Math.min(this.resolutionZ - 1, z + 1) * this.resolution;
+      for (let x = 0; x < this.resolutionX; x += 1) {
         const index = row + x;
         const blurred = (
           this.visualCoverageBlur[previousRow + x]
@@ -817,7 +802,7 @@ export class WaterSimulation {
         const leftTwoWet = x >= 2 && this.visualCoverageRaw[row + x - 2] > 0.5;
         const rightTwoWet = x + 2 < this.resolution && this.visualCoverageRaw[row + x + 2] > 0.5;
         const backTwoWet = z >= 2 && this.visualCoverageRaw[(z - 2) * this.resolution + x] > 0.5;
-        const frontTwoWet = z + 2 < this.resolution && this.visualCoverageRaw[(z + 2) * this.resolution + x] > 0.5;
+        const frontTwoWet = z + 2 < this.resolutionZ && this.visualCoverageRaw[(z + 2) * this.resolution + x] > 0.5;
         // 补连接在真实湿区之间的一至两格细缝，不向孤立岸边无条件扩张。
         const bridgesWetSegments = (leftWet && rightWet)
           || (backWet && frontWet)
@@ -838,7 +823,6 @@ export class WaterSimulation {
 
   private updateGeometry(): void {
     this.updateVisualCoverage();
-    const position = this.mesh.geometry.getAttribute("position") as THREE.BufferAttribute;
 
     for (let i = 0; i < this.depth.length; i += 1) {
       const targetSurfaceHeight = this.terrain.heights[i]
@@ -855,8 +839,8 @@ export class WaterSimulation {
     }
 
     this.renderSurfaceHeight.set(this.visualSurfaceHeight);
-    for (let z = 0; z < this.resolution; z += 1) {
-      for (let x = 0; x < this.resolution; x += 1) {
+    for (let z = 0; z < this.resolutionZ; z += 1) {
+      for (let x = 0; x < this.resolutionX; x += 1) {
         const index = z * this.resolution + x;
         const isTrueWaterSample = this.visualCoverageRaw[index] > 0.5
           && this.depth[index] > VISUAL_WET_EXIT_DEPTH;
@@ -868,11 +852,11 @@ export class WaterSimulation {
         for (let radius = 1; radius <= 2 && weightSum === 0; radius += 1) {
           for (let dz = -radius; dz <= radius; dz += 1) {
             const neighborZ = z + dz;
-            if (neighborZ < 0 || neighborZ >= this.resolution) continue;
+            if (neighborZ < 0 || neighborZ >= this.resolutionZ) continue;
             for (let dx = -radius; dx <= radius; dx += 1) {
               if (Math.max(Math.abs(dx), Math.abs(dz)) !== radius) continue;
               const neighborX = x + dx;
-              if (neighborX < 0 || neighborX >= this.resolution) continue;
+              if (neighborX < 0 || neighborX >= this.resolutionX) continue;
               const neighbor = neighborZ * this.resolution + neighborX;
               if (this.depth[neighbor] <= VISUAL_WET_EXIT_DEPTH) continue;
               const distance = Math.hypot(dx, dz);
@@ -886,24 +870,6 @@ export class WaterSimulation {
       }
     }
 
-    for (let i = 0; i < this.depth.length; i += 1) {
-      position.setY(i, this.renderSurfaceHeight[i]);
-      this.depthAttribute.setX(i, this.depth[i]);
-      this.flowAttribute.setXY(i, this.flowX[i], this.flowZ[i]);
-      this.flowSpeedAttribute.setX(i, this.flowSpeed[i]);
-      this.turbulenceAttribute.setX(i, this.turbulence[i]);
-      this.foamAttribute.setX(i, this.foam[i]);
-      this.lakeAttribute.setX(i, this.lakeFactor[i]);
-      this.shoreAttribute.setX(i, this.shoreFactor[i]);
-    }
-    position.needsUpdate = true;
-    this.depthAttribute.needsUpdate = true;
-    this.flowAttribute.needsUpdate = true;
-    this.flowSpeedAttribute.needsUpdate = true;
-    this.turbulenceAttribute.needsUpdate = true;
-    this.foamAttribute.needsUpdate = true;
-    this.lakeAttribute.needsUpdate = true;
-    this.shoreAttribute.needsUpdate = true;
   }
 
   private rebuildRenderGeometry(): void {

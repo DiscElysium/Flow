@@ -12,6 +12,8 @@ import {
   Hand,
   MapPin,
   Mountain,
+  PanelRightClose,
+  PanelRightOpen,
   Pickaxe,
   RefreshCw,
   Save,
@@ -25,6 +27,7 @@ import {
 } from "lucide-react";
 import type { MapSaveData, SavedMapMeta, TerrainTool, WorldStats } from "@/engine/types";
 import type { AlpineWorld } from "@/engine/world/AlpineWorld";
+import { WORLD_CONFIG } from "@/engine/config";
 
 const SAVES_KEY = "alpineflowlab:saves";
 const SAVES_DATA_PREFIX = "alpineflowlab:save-data:";
@@ -132,15 +135,21 @@ function createSeed(): string {
 export function AlpineFlowLab() {
   const hostRef = useRef<HTMLDivElement>(null);
   const worldRef = useRef<AlpineWorld | null>(null);
+  const coverDismissTimerRef = useRef<number | null>(null);
+  const tutorialTimerRef = useRef<number | null>(null);
+  const introRequestedRef = useRef(false);
   const [seed, setSeed] = useState("NIVAL-042");
   const [ready, setReady] = useState(false);
   const [renderError, setRenderError] = useState(false);
-  const [showTutorial, setShowTutorial] = useState(true);
+  const [showCover, setShowCover] = useState(true);
+  const [coverClosing, setCoverClosing] = useState(false);
+  const [showTutorial, setShowTutorial] = useState(false);
   const [showSaves, setShowSaves] = useState(false);
+  const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
   const [mode, setMode] = useState<"edit" | "play">("play");
   const [tool, setTool] = useState<TerrainTool>("orbit");
-  const [brushRadius, setBrushRadius] = useState(3.2);
-  const [brushStrength, setBrushStrength] = useState(5.4);
+  const [brushRadius, setBrushRadius] = useState(WORLD_CONFIG.brush.radius);
+  const [brushStrength, setBrushStrength] = useState(WORLD_CONFIG.brush.strength);
   const [waterActive, setWaterActive] = useState(false);
   const [flowRate, setFlowRate] = useState(1);
   const [irrigationRadius, setIrrigationRadius] = useState(3);
@@ -161,6 +170,41 @@ export function AlpineFlowLab() {
     if (editMode) setTool("orbit");
     setMode(editMode ? "play" : "edit");
   }, [editMode]);
+
+  const scheduleTutorial = useCallback((delayMs: number) => {
+    if (tutorialTimerRef.current !== null) window.clearTimeout(tutorialTimerRef.current);
+    tutorialTimerRef.current = window.setTimeout(() => {
+      setShowTutorial(true);
+      tutorialTimerRef.current = null;
+    }, delayMs);
+  }, []);
+
+  const startCoverCameraMove = useCallback(() => {
+    introRequestedRef.current = true;
+    const world = worldRef.current;
+    world?.pulseWaterFlow(0.1);
+    const duration = world?.startIntroCameraMove();
+    if (duration !== undefined) scheduleTutorial(duration + 180);
+    else if (renderError) scheduleTutorial(500);
+  }, [renderError, scheduleTutorial]);
+
+  const dismissCover = useCallback(() => {
+    if (coverClosing) return;
+    setCoverClosing(true);
+    startCoverCameraMove();
+    coverDismissTimerRef.current = window.setTimeout(() => {
+      setShowCover(false);
+      setCoverClosing(false);
+      coverDismissTimerRef.current = null;
+    }, 460);
+  }, [coverClosing, startCoverCameraMove]);
+
+  useEffect(() => () => {
+    if (coverDismissTimerRef.current !== null) {
+      window.clearTimeout(coverDismissTimerRef.current);
+    }
+    if (tutorialTimerRef.current !== null) window.clearTimeout(tutorialTimerRef.current);
+  }, []);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => setSaves(parseSavesMeta()));
@@ -189,6 +233,10 @@ export function AlpineFlowLab() {
               setSeed(initialSave.seed);
             }
             worldRef.current = world;
+            if (introRequestedRef.current) {
+              world.pulseWaterFlow(0.1);
+              scheduleTutorial(world.startIntroCameraMove() + 180);
+            }
             setStats((current) => ({ ...current, peak: world?.terrain.maxHeight ?? 0 }));
             setReady(true);
           },
@@ -200,6 +248,7 @@ export function AlpineFlowLab() {
         if (active) {
           setRenderError(true);
           setReady(true);
+          if (introRequestedRef.current) scheduleTutorial(500);
         }
       }
     }
@@ -244,6 +293,7 @@ export function AlpineFlowLab() {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (target?.matches("input, textarea, select")) return;
+      if (showcaseActive) return;
       const key = event.key.toLowerCase();
       if (key === "m") {
         toggleMode();
@@ -268,7 +318,7 @@ export function AlpineFlowLab() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [editMode, toggleMode]);
+  }, [editMode, showcaseActive, toggleMode]);
 
   const showSaveMessage = useCallback((text: string, type: "ok" | "error" = "ok") => {
     setSaveMessage({ text, type });
@@ -363,6 +413,21 @@ export function AlpineFlowLab() {
       {renderError && <FallbackMountain />}
       <div className="atmosphere-grain" aria-hidden="true" />
 
+      {showCover && (
+        <button
+          type="button"
+          className={`title-cover ${coverClosing ? "is-closing" : ""}`}
+          onClick={dismissCover}
+          aria-label="Enter FLOW"
+        >
+          <FallbackMountain className="title-cover-mountain" />
+          <span className="title-cover-kicker">A LANDSCAPE SHAPED BY WATER</span>
+          <span className="title-cover-word">FLOW</span>
+          <span className="title-cover-current" aria-hidden="true"><i /></span>
+          <span className="title-cover-prompt">CLICK ANYWHERE TO BEGIN</span>
+        </button>
+      )}
+
       {!showcaseActive && (
         <div
           className="watered-progress"
@@ -428,10 +493,30 @@ export function AlpineFlowLab() {
         </button>
       )}
 
-      {!showcaseActive && <aside className="terrain-readout glass-panel" aria-label="Terrain and water data">
+      {!showcaseActive && <aside className={`terrain-readout glass-panel ${rightPanelCollapsed ? "is-collapsed" : ""}`} aria-label="Terrain and water data">
+        {rightPanelCollapsed ? (
+          <button
+            className="readout-expand-button"
+            onClick={() => setRightPanelCollapsed(false)}
+            aria-label="Expand terrain and water panel"
+            title="Expand panel"
+          >
+            <PanelRightOpen size={18} />
+          </button>
+        ) : <>
         <div className="readout-heading">
           <span><Sparkles size={15} /> LIVE PROFILE</span>
-          <b>{stats.fps} FPS</b>
+          <span className="readout-heading-actions">
+            <b>{stats.fps} FPS</b>
+            <button
+              className="readout-collapse-button"
+              onClick={() => setRightPanelCollapsed(true)}
+              aria-label="Collapse terrain and water panel"
+              title="Collapse panel"
+            >
+              <PanelRightClose size={15} />
+            </button>
+          </span>
         </div>
         <dl>
           <div><dt>PEAK HEIGHT</dt><dd>{stats.peak.toFixed(1)}<small> km*</small></dd></div>
@@ -519,6 +604,7 @@ export function AlpineFlowLab() {
           )}
         </section>
         <p className="scale-note">* Stylized simulation units for comparing relative change</p>
+        </>}
       </aside>}
 
       {!showcaseActive && <nav className={`tool-dock glass-panel ${editMode ? "" : "is-play"}`} aria-label="Terrain tools">
@@ -545,11 +631,11 @@ export function AlpineFlowLab() {
           <div className="brush-sliders">
             <label>
               <span>SIZE <b>{brushRadius.toFixed(1)}</b></span>
-              <input type="range" min="1.2" max="8" step="0.1" value={brushRadius} onChange={(event) => setBrushRadius(Number(event.target.value))} disabled={renderError} />
+              <input type="range" min={WORLD_CONFIG.brush.minRadius} max={WORLD_CONFIG.brush.maxRadius} step="0.1" value={brushRadius} onChange={(event) => setBrushRadius(Number(event.target.value))} disabled={renderError} />
             </label>
             <label>
               <span>STRENGTH <b>{brushStrength.toFixed(1)}</b></span>
-              <input type="range" min="1" max="10" step="0.2" value={brushStrength} onChange={(event) => setBrushStrength(Number(event.target.value))} disabled={renderError} />
+              <input type="range" min={WORLD_CONFIG.brush.minStrength} max={WORLD_CONFIG.brush.maxStrength} step="0.2" value={brushStrength} onChange={(event) => setBrushStrength(Number(event.target.value))} disabled={renderError} />
             </label>
           </div>
         )}
@@ -588,15 +674,13 @@ export function AlpineFlowLab() {
             <button className="notes-close" onClick={() => setShowTutorial(false)} aria-label="Close tutorial"><X size={18} /></button>
             <p className="eyebrow"><span>PLAY</span> QUICK TUTORIAL</p>
             <h2 id="tutorial-title">Follow the water</h2>
-            <p className="tutorial-intro">The essential controls for exploring the mountain in Play Mode.</p>
+            <p className="tutorial-intro">Find the source, shape a path, and let the mountain flow.</p>
             <ol>
-              <li className="tutorial-goal"><b>YOUR GOAL</b><span>Guide meltwater across the dry yellow ground and turn as much of it green as possible. The percentage in the upper-left tracks your progress.</span></li>
-              <li><b>ROTATE VIEW</b><span><kbd>MIDDLE MOUSE</kbd> + drag to orbit around the mountain.</span></li>
-              <li><b>MOVE VIEW</b><span>Hold <kbd>SHIFT</kbd> + <kbd>MIDDLE MOUSE</kbd>, then drag to move the view sideways or vertically.</span></li>
-              <li><b>ZOOM</b><span>Use the <kbd>MOUSE WHEEL</kbd> to move closer to or farther from the landscape.</span></li>
-              <li><b>SHAPE FLOW</b><span>Choose <kbd>D</kbd> Carve, <kbd>B</kbd> Raise, or <kbd>S</kbd> Smooth, then drag with the left mouse button across the terrain.</span></li>
-              <li><b>RUN WATER</b><span>Press <kbd>SPACE</kbd> to start or pause the meltwater. Use Flow Rate to change how much water enters the landscape.</span></li>
-              <li><b>RESET VIEW</b><span>Select the focus button in the top bar whenever you want to return to the recommended viewpoint.</span></li>
+              <li className="tutorial-goal"><b>YOUR GOAL</b><span>Lead the mountain’s water toward the thirsty yellow earth. With every patch that turns green, the valley quietly returns to life.</span></li>
+              <li><b>FIND THE SOURCE</b><span>Water begins at the marker high on the mountain.</span></li>
+              <li><b>EXPLORE</b><span>Drag <kbd>MIDDLE MOUSE</kbd> to orbit, add <kbd>SHIFT</kbd> to move, and scroll to zoom.</span></li>
+              <li><b>SHAPE A PATH</b><span>Use <kbd>D</kbd> Carve, <kbd>B</kbd> Raise, or <kbd>S</kbd> Smooth, then drag across the terrain.</span></li>
+              <li><b>LET IT FLOW</b><span>Press <kbd>SPACE</kbd> to start or pause the water.</span></li>
             </ol>
           </section>
         </div>
@@ -645,15 +729,15 @@ export function AlpineFlowLab() {
   );
 }
 
-function FallbackMountain() {
+function FallbackMountain({ className = "" }: { className?: string }) {
   return (
-    <div className="fallback-mountain" aria-hidden="true">
+    <span className={`fallback-mountain ${className}`.trim()} aria-hidden="true">
       <i className="fallback-sun" />
       <span className="mountain-back" />
       <span className="mountain-mid" />
       <span className="mountain-front" />
       <span className="mountain-snow" />
       <span className="fallback-ground" />
-    </div>
+    </span>
   );
 }

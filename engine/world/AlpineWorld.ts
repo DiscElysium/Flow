@@ -13,6 +13,10 @@ import { OceanSystem } from "@/engine/water/OceanSystem";
 import { WaterShowcaseScene } from "@/engine/water/WaterShowcaseScene";
 
 const IRRIGATION_UPDATE_INTERVAL = 0.4;
+const WATER_SIMULATION_INTERVAL = 1 / 45;
+const PIXEL_RATIO_CHECK_INTERVAL = 2_000;
+const INTRO_CAMERA_DURATION_MS = 3_000;
+const PLAY_HOME_DISTANCE = 210;
 
 export class AlpineWorld {
   readonly terrain: TerrainSystem;
@@ -34,7 +38,7 @@ export class AlpineWorld {
   private readonly brushCursor: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>;
   private frame = 0;
   private disposed = false;
-  private editMode = true;
+  private editMode = false;
   private tool: TerrainTool = "orbit";
   private brushRadius: number = WORLD_CONFIG.brush.radius;
   private brushStrength: number = WORLD_CONFIG.brush.strength;
@@ -42,12 +46,17 @@ export class AlpineWorld {
   private _waterCheckAccum = 0;
   private readonly waterProximity: Uint8Array;
   private waterActive = false;
+  private waterPulseRemaining = 0;
   private flowRate = 1;
   private flowDelay = 0.1;
   private editing = false;
   private editedInStroke = false;
   private lastEditTime = 0;
   private lastFrameTime = performance.now();
+  private pixelRatioCheckTime = performance.now();
+  private waterSimulationAccumulator = 0;
+  private maxPixelRatio = 1;
+  private renderPixelRatio = 1;
   private statsTime = 0;
   private fps = 60;
   private currentSeed: string;
@@ -57,6 +66,18 @@ export class AlpineWorld {
   private sourcePlacementActive = false;
   private readonly savedWorldCameraPosition = new THREE.Vector3();
   private readonly savedWorldCameraTarget = new THREE.Vector3();
+  private savedWorldCameraZoom = 1;
+  private readonly editCameraPosition = new THREE.Vector3();
+  private readonly editCameraTarget = new THREE.Vector3();
+  private editCameraZoom = 1;
+  private readonly playCameraPosition = new THREE.Vector3();
+  private readonly playCameraTarget = new THREE.Vector3();
+  private playCameraZoom = 1;
+  private introCameraActive = false;
+  private introCameraStartTime = 0;
+  private readonly introCameraStartPosition = new THREE.Vector3();
+  private readonly introCameraEndPosition = new THREE.Vector3();
+  private readonly introCameraTarget = new THREE.Vector3();
 
   constructor(
     private readonly container: HTMLElement,
@@ -64,8 +85,10 @@ export class AlpineWorld {
     private readonly handlers: WorldEventHandlers = {},
   ) {
     this.currentSeed = seed;
+    this.maxPixelRatio = Math.min(window.devicePixelRatio, 1.5);
+    this.renderPixelRatio = this.maxPixelRatio;
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75));
+    this.renderer.setPixelRatio(this.renderPixelRatio);
     this.renderer.setSize(container.clientWidth, container.clientHeight);
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -83,7 +106,7 @@ export class AlpineWorld {
     );
     this.camera.position.fromArray(WORLD_CONFIG.camera.position);
 
-    this.scene.fog = new THREE.FogExp2("#cbd9d4", 0.0078);
+    this.scene.fog = new THREE.FogExp2("#cbd9d4", 0.0036);
     this.createAtmosphere();
     this.createLighting();
     this.waterShowcase = new WaterShowcaseScene();
@@ -92,7 +115,7 @@ export class AlpineWorld {
     this.scenery = new ScenerySystem(this.scene, this.terrain, seed);
     this.skyWildlife = new SkyWildlifeSystem(this.scene, this.terrain, seed);
     this.water = new WaterSimulation(this.scene, this.terrain);
-    this.waterProximity = new Uint8Array(this.terrain.resolution * this.terrain.resolution);
+    this.waterProximity = new Uint8Array(this.terrain.heights.length);
     this.models = new ModelManager(this.scene, this.terrain, MODELS_CONFIG);
     this.models.attachScenery(this.scenery);
     this.models.initialize().catch((err) => console.warn("Model loading failed:", err));
@@ -101,15 +124,22 @@ export class AlpineWorld {
     this.brushCursor = this.createBrushCursor();
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-    this.controls.target.fromArray(WORLD_CONFIG.camera.target);
+    this.controls.target.copy(this.waterSourceViewTarget());
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.055;
     this.controls.minDistance = 24;
-    this.controls.maxDistance = 320;
+    this.controls.maxDistance = 850;
     this.controls.minPolarAngle = 0.18;
     this.controls.maxPolarAngle = Math.PI * 0.475;
     this.controls.enablePan = true;
     this.controls.update();
+    this.editCameraPosition.copy(this.camera.position);
+    this.editCameraTarget.copy(this.controls.target);
+    this.editCameraZoom = this.camera.zoom;
+    this.playCameraPosition.copy(this.camera.position);
+    this.playCameraTarget.copy(this.controls.target);
+    this.playCameraZoom = this.camera.zoom;
+    this.constrainPlayOrbitTarget();
     this.syncControlMode();
 
     this.renderer.domElement.addEventListener("pointerdown", this.onPointerDown, true);
@@ -117,6 +147,7 @@ export class AlpineWorld {
     this.renderer.domElement.addEventListener("pointerleave", this.onPointerLeave);
     this.renderer.domElement.addEventListener("contextmenu", this.onContextMenu);
     window.addEventListener("pointerup", this.onPointerUp);
+    window.addEventListener("pointercancel", this.onPointerUp);
 
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(this.container);
@@ -131,11 +162,36 @@ export class AlpineWorld {
   }
 
   setEditMode(enabled: boolean): void {
+    if (this.editMode === enabled) {
+      this.syncControlMode();
+      if (!enabled) this.constrainPlayOrbitTarget();
+      return;
+    }
+    this.finishIntroCameraMove();
+    if (enabled) {
+      this.playCameraPosition.copy(this.camera.position);
+      this.playCameraTarget.copy(this.controls.target);
+      this.playCameraZoom = this.camera.zoom;
+      this.camera.position.copy(this.editCameraPosition);
+      this.controls.target.copy(this.editCameraTarget);
+      this.camera.zoom = this.editCameraZoom;
+    } else {
+      this.finishSourcePlacement();
+      this.editCameraPosition.copy(this.camera.position);
+      this.editCameraTarget.copy(this.controls.target);
+      this.editCameraZoom = this.camera.zoom;
+      this.camera.position.copy(this.playCameraPosition);
+      this.controls.target.copy(this.playCameraTarget);
+      this.camera.zoom = this.playCameraZoom;
+    }
     this.editMode = enabled;
     if (!enabled) {
-      this.finishSourcePlacement();
       if (this.isEditOnlyTool(this.tool)) this.setTool("orbit");
     }
+    this.camera.updateProjectionMatrix();
+    this.syncControlMode();
+    this.controls.update();
+    if (!enabled) this.constrainPlayOrbitTarget();
   }
 
   setBrushRadius(radius: number): void {
@@ -146,11 +202,20 @@ export class AlpineWorld {
 
   setBrushStrength(strength: number): void {
     if (!this.editMode) return;
-    this.brushStrength = THREE.MathUtils.clamp(strength, 1, 10);
+    this.brushStrength = THREE.MathUtils.clamp(
+      strength,
+      WORLD_CONFIG.brush.minStrength,
+      WORLD_CONFIG.brush.maxStrength,
+    );
   }
 
   setWaterActive(active: boolean): void {
     this.waterActive = active;
+  }
+
+  /** Advance loaded water briefly without changing the play UI's paused state. */
+  pulseWaterFlow(seconds = 0.1): void {
+    this.waterPulseRemaining = Math.max(this.waterPulseRemaining, Math.max(0, seconds));
   }
 
   setFlowRate(rate: number): void {
@@ -172,8 +237,28 @@ export class AlpineWorld {
     this.flowDelay = THREE.MathUtils.clamp(seconds, 0.02, 0.5);
   }
 
+  /** Play the opening dolly from the full valley view toward the water source. */
+  startIntroCameraMove(): number {
+    if (this.showcaseActive) return 0;
+    this.camera.position.fromArray(WORLD_CONFIG.camera.position);
+    this.controls.target.copy(this.waterSourceViewTarget());
+    this.camera.zoom = 1;
+    this.camera.updateProjectionMatrix();
+    this.controls.update();
+    this.introCameraStartPosition.copy(this.camera.position);
+    this.introCameraTarget.copy(this.controls.target);
+    this.introCameraEndPosition.copy(
+      this.cameraPositionForTarget(this.introCameraTarget, PLAY_HOME_DISTANCE),
+    );
+    this.introCameraStartTime = performance.now();
+    this.introCameraActive = true;
+    this.syncControlMode();
+    return INTRO_CAMERA_DURATION_MS;
+  }
+
   setShowcaseActive(active: boolean): void {
     if (this.showcaseActive === active) return;
+    this.finishIntroCameraMove();
     this.showcaseActive = active;
     this.finishSourcePlacement();
     this.brushCursor.visible = false;
@@ -181,14 +266,19 @@ export class AlpineWorld {
     if (active) {
       this.savedWorldCameraPosition.copy(this.camera.position);
       this.savedWorldCameraTarget.copy(this.controls.target);
+      this.savedWorldCameraZoom = this.camera.zoom;
       this.camera.position.set(0, 30, 52);
       this.controls.target.set(0, 2.2, 0);
+      this.camera.zoom = 1;
     } else {
       this.camera.position.copy(this.savedWorldCameraPosition);
       this.controls.target.copy(this.savedWorldCameraTarget);
+      this.camera.zoom = this.savedWorldCameraZoom;
     }
+    this.camera.updateProjectionMatrix();
     this.syncControlMode();
     this.controls.update();
+    if (!active && !this.editMode) this.constrainPlayOrbitTarget();
   }
 
   regenerate(seed: string): void {
@@ -239,6 +329,9 @@ export class AlpineWorld {
   /** 导出当前地形与水体的完整快照 */
   getSaveState(): MapSaveData {
     return {
+      gridWidth: this.terrain.resolutionX,
+      gridHeight: this.terrain.resolutionZ,
+      verticalScale: WORLD_CONFIG.verticalScale,
       heights: Array.from(this.terrain.heights),
       waterDepths: this.water.getDepthSnapshot(),
       sourceIndex: this.terrain.sourceIndex,
@@ -257,18 +350,40 @@ export class AlpineWorld {
   /** 从快照恢复地形与水体的完整状态 */
   loadSaveState(data: MapSaveData): void {
     this.finishSourcePlacement();
+    // Square saves from the previous world layout cannot be indexed safely by
+    // the new 336 x 112 rectangular grid. Rebuild the same seed in the new
+    // format instead of stretching its old cells or leaving invalid holes.
+    if (data.heights.length !== this.terrain.heights.length) {
+      this.regenerate(data.seed);
+      return;
+    }
     this.currentSeed = data.seed;
-    this.terrain.heights = new Float32Array(data.heights);
+    // Rebuild the static side scenery from the save's seed first. The active
+    // strip is overwritten below by the saved, edited height field.
+    this.terrain.regenerate(data.seed);
+    const savedVerticalScale = Math.max(0.0001, data.verticalScale ?? 1);
+    const migrationScale = WORLD_CONFIG.verticalScale / savedVerticalScale;
+    const migratedHeights = new Float32Array(data.heights.length);
+    let migratedMinHeight = Number.POSITIVE_INFINITY;
+    let migratedMaxHeight = Number.NEGATIVE_INFINITY;
+    for (let index = 0; index < data.heights.length; index += 1) {
+      const height = WORLD_CONFIG.seaLevel
+        + (data.heights[index] - WORLD_CONFIG.seaLevel) * migrationScale;
+      migratedHeights[index] = height;
+      migratedMinHeight = Math.min(migratedMinHeight, height);
+      migratedMaxHeight = Math.max(migratedMaxHeight, height);
+    }
+    this.terrain.heights = migratedHeights;
     this.terrain.sourceIndex = data.sourceIndex;
     this.terrain.peakIndex = data.peakIndex;
-    this.terrain.minHeight = data.minHeight;
-    this.terrain.maxHeight = data.maxHeight;
+    this.terrain.minHeight = migratedMinHeight;
+    this.terrain.maxHeight = migratedMaxHeight;
     // 地形需要通过 regenerate 来重建几何体，但 regenerate 会覆盖 heights。
     // 所以这里直接用 TerrainSystem 的 rebuildGeometry 对应的方案：直接替换 + 重建
     this.terrain["rebuildGeometry"]();
     this.terrain.loadGroundPaintState(data.groundPaint);
     this.terrain.loadRockPaintState(data.rockPaint, data.rockGroups, data.rockHeightsIntegrated);
-    this.scenery.refreshHeights();
+    this.scenery.regenerate(data.seed);
     this.skyWildlife.regenerate(data.seed);
     // 恢复外部模型（terrain 重建后高度已就绪）
     if (data.modelInstances && data.modelInstances.length > 0) {
@@ -279,17 +394,36 @@ export class AlpineWorld {
     // 恢复水体
     this.water.restoreDepthSnapshot(data.waterDepths);
     this.updateIrrigation();
+    this.focusHome();
   }
 
   focusHome(): void {
+    this.introCameraActive = false;
     if (this.showcaseActive) {
       this.camera.position.set(0, 30, 52);
       this.controls.target.set(0, 2.2, 0);
+      this.camera.zoom = 1;
     } else {
-      this.camera.position.fromArray(WORLD_CONFIG.camera.position);
-      this.controls.target.fromArray(WORLD_CONFIG.camera.target);
+      const target = this.waterSourceViewTarget();
+      this.camera.position.copy(this.editMode
+        ? new THREE.Vector3().fromArray(WORLD_CONFIG.camera.position)
+        : this.cameraPositionForTarget(target, PLAY_HOME_DISTANCE));
+      this.controls.target.copy(target);
+      this.camera.zoom = 1;
+      if (this.editMode) {
+        this.editCameraPosition.copy(this.camera.position);
+        this.editCameraTarget.copy(this.controls.target);
+        this.editCameraZoom = this.camera.zoom;
+      } else {
+        this.playCameraPosition.copy(this.camera.position);
+        this.playCameraTarget.copy(this.controls.target);
+        this.playCameraZoom = this.camera.zoom;
+      }
     }
+    this.camera.updateProjectionMatrix();
+    this.syncControlMode();
     this.controls.update();
+    if (!this.editMode && !this.showcaseActive) this.constrainPlayOrbitTarget();
   }
 
   dispose(): void {
@@ -302,6 +436,7 @@ export class AlpineWorld {
     this.renderer.domElement.removeEventListener("pointerleave", this.onPointerLeave);
     this.renderer.domElement.removeEventListener("contextmenu", this.onContextMenu);
     window.removeEventListener("pointerup", this.onPointerUp);
+    window.removeEventListener("pointercancel", this.onPointerUp);
     this.terrain.dispose();
     this.scenery.dispose();
     this.skyWildlife.dispose();
@@ -319,15 +454,15 @@ export class AlpineWorld {
   private createLighting(): void {
     this.scene.add(new THREE.HemisphereLight("#e7f0ee", "#55605b", 2.15));
     const sun = new THREE.DirectionalLight("#fff3d6", 4.25);
-    sun.position.set(-52, 92, 48);
+    sun.position.set(-96, 430, 62);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
-    sun.shadow.camera.left = -90;
-    sun.shadow.camera.right = 90;
-    sun.shadow.camera.top = 88;
-    sun.shadow.camera.bottom = -88;
+    sun.shadow.camera.left = -340;
+    sun.shadow.camera.right = 340;
+    sun.shadow.camera.top = 340;
+    sun.shadow.camera.bottom = -340;
     sun.shadow.camera.near = 1;
-    sun.shadow.camera.far = 190;
+    sun.shadow.camera.far = 900;
     // 低多边形大平面容易和自身阴影发生深度竞争，形成整片摩尔纹。
     sun.shadow.bias = -0.0012;
     sun.shadow.normalBias = 0.075;
@@ -335,13 +470,13 @@ export class AlpineWorld {
     this.scene.add(sun);
 
     const rim = new THREE.DirectionalLight("#b8d6dd", 1.3);
-    rim.position.set(24, 10, -22);
+    rim.position.set(24, 30, -22);
     this.scene.add(rim);
   }
 
   private createAtmosphere(): void {
     const sky = new THREE.Mesh(
-      new THREE.SphereGeometry(360, 20, 12),
+      new THREE.SphereGeometry(1600, 20, 12),
       new THREE.ShaderMaterial({
         side: THREE.BackSide,
         depthWrite: false,
@@ -375,7 +510,7 @@ export class AlpineWorld {
     this.scene.add(sky);
 
     const base = new THREE.Mesh(
-      new THREE.CircleGeometry(310, 48),
+      new THREE.CircleGeometry(560, 64),
       new THREE.MeshStandardMaterial({ color: "#74877d", roughness: 1, flatShading: true }),
     );
     base.rotation.x = -Math.PI / 2;
@@ -405,6 +540,8 @@ export class AlpineWorld {
 
   private syncControlMode(): void {
     const orbitMode = this.showcaseActive || this.tool === "orbit";
+    this.controls.enabled = !this.sourcePlacementActive && !this.introCameraActive;
+    this.controls.enablePan = true;
     this.controls.mouseButtons.LEFT = orbitMode ? THREE.MOUSE.ROTATE : (-1 as THREE.MOUSE);
     this.controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
     this.controls.mouseButtons.RIGHT = -1 as THREE.MOUSE;
@@ -421,6 +558,81 @@ export class AlpineWorld {
     this.brushCursor.material.color.set(colors[this.tool]);
     this.renderer.domElement.dataset.tool = this.showcaseActive ? "orbit" : this.tool;
     this.renderer.domElement.dataset.sourcePlacement = this.sourcePlacementActive ? "active" : "idle";
+  }
+
+  private waterSourceViewTarget(): THREE.Vector3 {
+    const target = this.terrain.indexToWorld(this.terrain.sourceIndex);
+    target.y += 2.5;
+    return target;
+  }
+
+  private cameraPositionForTarget(target: THREE.Vector3, distance: number): THREE.Vector3 {
+    const position = new THREE.Vector3().fromArray(WORLD_CONFIG.camera.position);
+    const offset = position.sub(target);
+    if (offset.lengthSq() < 0.0001) offset.set(1, 0.45, 0.8);
+    offset.setLength(Math.min(distance, offset.length()));
+    return target.clone().add(offset);
+  }
+
+  private finishIntroCameraMove(): void {
+    if (!this.introCameraActive) return;
+    this.camera.position.copy(this.introCameraEndPosition);
+    this.controls.target.copy(this.introCameraTarget);
+    this.introCameraActive = false;
+    if (this.editMode) {
+      this.editCameraPosition.copy(this.camera.position);
+      this.editCameraTarget.copy(this.controls.target);
+      this.editCameraZoom = this.camera.zoom;
+    } else {
+      this.playCameraPosition.copy(this.camera.position);
+      this.playCameraTarget.copy(this.controls.target);
+      this.playCameraZoom = this.camera.zoom;
+    }
+    this.syncControlMode();
+    this.controls.update();
+    this.constrainPlayOrbitTarget();
+  }
+
+  private updateIntroCamera(time: number): void {
+    const progress = THREE.MathUtils.clamp(
+      (time - this.introCameraStartTime) / INTRO_CAMERA_DURATION_MS,
+      0,
+      1,
+    );
+    const eased = progress < 0.5
+      ? 4 * progress * progress * progress
+      : 1 - Math.pow(-2 * progress + 2, 3) * 0.5;
+    this.camera.position.lerpVectors(
+      this.introCameraStartPosition,
+      this.introCameraEndPosition,
+      eased,
+    );
+    this.controls.target.copy(this.introCameraTarget);
+    this.camera.lookAt(this.introCameraTarget);
+    if (progress >= 1) this.finishIntroCameraMove();
+  }
+
+  /** Keep Play Mode focused on the simulated middle third, not the static side scenery. */
+  private constrainPlayOrbitTarget(): void {
+    if (this.editMode || this.showcaseActive) return;
+    const padding = this.terrain.cellSize;
+    const halfLength = WORLD_CONFIG.sizeX * 0.5 - padding;
+    const halfPlayableWidth = WORLD_CONFIG.sizeZ * 0.5 - padding;
+    const clampedX = THREE.MathUtils.clamp(this.controls.target.x, -halfLength, halfLength);
+    const clampedZ = THREE.MathUtils.clamp(
+      this.controls.target.z,
+      -halfPlayableWidth,
+      halfPlayableWidth,
+    );
+    const correctionX = clampedX - this.controls.target.x;
+    const correctionZ = clampedZ - this.controls.target.z;
+    if (correctionX === 0 && correctionZ === 0) return;
+    this.controls.target.x = clampedX;
+    this.controls.target.z = clampedZ;
+    // Shift the camera by the same amount so hitting a boundary does not alter
+    // the current orbit angle or zoom distance.
+    this.camera.position.x += correctionX;
+    this.camera.position.z += correctionZ;
   }
 
   private updatePointer(event: PointerEvent): THREE.Intersection | null {
@@ -577,15 +789,33 @@ export class AlpineWorld {
     this.lastFrameTime = time;
     const instantFps = 1 / deltaTime;
     this.fps = THREE.MathUtils.lerp(this.fps, instantFps, 0.06);
-    this.controls.update();
+    this.updateAdaptivePixelRatio(time);
+    if (this.introCameraActive) this.updateIntroCamera(time);
+    else {
+      this.controls.update();
+      this.constrainPlayOrbitTarget();
+    }
     const audioFocus = this.controls.target;
     this.ambientAudio.update(deltaTime, {
       viewDistance: this.camera.position.distanceTo(audioFocus),
       waterPresence: this.showcaseActive ? 0 : this.waterPresenceNear(audioFocus.x, audioFocus.z),
       forestPresence: this.showcaseActive ? 0 : this.scenery.greenForestPresenceAt(audioFocus.x, audioFocus.z),
     });
-    if (!this.showcaseActive && this.waterActive && !this.sourcePlacementActive) {
-      this.water.step(deltaTime, this.flowRate, this.flowDelay);
+    const waterPulseActive = this.waterPulseRemaining > 0;
+    if (waterPulseActive) {
+      this.waterPulseRemaining = Math.max(0, this.waterPulseRemaining - deltaTime);
+    }
+    if (!this.showcaseActive && (this.waterActive || waterPulseActive) && !this.sourcePlacementActive) {
+      this.waterSimulationAccumulator = Math.min(
+        this.waterSimulationAccumulator + deltaTime,
+        WATER_SIMULATION_INTERVAL * 2,
+      );
+      while (this.waterSimulationAccumulator >= WATER_SIMULATION_INTERVAL) {
+        this.water.step(WATER_SIMULATION_INTERVAL, this.flowRate, this.flowDelay);
+        this.waterSimulationAccumulator -= WATER_SIMULATION_INTERVAL;
+      }
+    } else {
+      this.waterSimulationAccumulator = 0;
     }
     if (this.showcaseActive) this.waterShowcase.update(time);
     else {
@@ -615,6 +845,20 @@ export class AlpineWorld {
     }
     this.renderer.render(this.showcaseActive ? this.waterShowcase.scene : this.scene, this.camera);
   };
+
+  /** Keep GPU cost stable by adjusting only the internal render resolution. */
+  private updateAdaptivePixelRatio(time: number): void {
+    if (time - this.pixelRatioCheckTime < PIXEL_RATIO_CHECK_INTERVAL) return;
+    this.pixelRatioCheckTime = time;
+    let nextPixelRatio = this.renderPixelRatio;
+    if (this.fps < 48) nextPixelRatio -= 0.15;
+    else if (this.fps > 57) nextPixelRatio += 0.1;
+    nextPixelRatio = THREE.MathUtils.clamp(nextPixelRatio, 1, this.maxPixelRatio);
+    nextPixelRatio = Math.round(nextPixelRatio * 20) / 20;
+    if (Math.abs(nextPixelRatio - this.renderPixelRatio) < 0.001) return;
+    this.renderPixelRatio = nextPixelRatio;
+    this.renderer.setPixelRatio(this.renderPixelRatio);
+  }
 
   private updateIrrigation(elapsedSeconds = IRRIGATION_UPDATE_INTERVAL): void {
     this.water.fillProximityMask(this.waterProximity, this.irrigationRadius);

@@ -172,6 +172,7 @@ export class WaterGameEffects {
 
   private buildRiverCrests(fields: WaterEffectFields, buffers: CrestBuffers): void {
     const resolution = this.terrain.resolution;
+    const resolutionZ = this.terrain.resolutionZ;
 
     // Existing crests use relaxed exit thresholds and must remain unstable for
     // several rebuilds before removal. This prevents the 20 Hz effect rebuild
@@ -209,7 +210,7 @@ export class WaterGameEffects {
 
     // New crests still need to pass the stricter visual checks. Once admitted,
     // their anchor keeps identity, phase and lateral placement stable.
-    for (let z = 1; z < resolution - 1 && this.riverAnchors.size < MAX_RIVER_CRESTS; z += 1) {
+    for (let z = 1; z < resolutionZ - 1 && this.riverAnchors.size < MAX_RIVER_CRESTS; z += 1) {
       for (let x = 1; x < resolution - 1 && this.riverAnchors.size < MAX_RIVER_CRESTS; x += 1) {
         const index = z * resolution + x;
         if (this.riverAnchors.has(index)) continue;
@@ -234,9 +235,9 @@ export class WaterGameEffects {
         const length = THREE.MathUtils.lerp(0.52, 1.08, speed) * THREE.MathUtils.lerp(0.86, 1.1, this.hash(x, z, 7));
         const endpointCells = Math.max(1, Math.ceil(length * 0.5 / this.terrain.cellSize));
         const startX = THREE.MathUtils.clamp(Math.round(x - direction.x * endpointCells), 1, resolution - 2);
-        const startZ = THREE.MathUtils.clamp(Math.round(z - direction.y * endpointCells), 1, resolution - 2);
+        const startZ = THREE.MathUtils.clamp(Math.round(z - direction.y * endpointCells), 1, resolutionZ - 2);
         const endX = THREE.MathUtils.clamp(Math.round(x + direction.x * endpointCells), 1, resolution - 2);
-        const endZ = THREE.MathUtils.clamp(Math.round(z + direction.y * endpointCells), 1, resolution - 2);
+        const endZ = THREE.MathUtils.clamp(Math.round(z + direction.y * endpointCells), 1, resolutionZ - 2);
         if (fields.coverage[startZ * resolution + startX] < 100 || fields.coverage[endZ * resolution + endX] < 100) continue;
         const lateralScale = bothSidesWet ? 0.38 : 0.14;
         const lateral = (this.hash(x, z, 13) - 0.5) * this.terrain.cellSize * lateralScale;
@@ -280,6 +281,7 @@ export class WaterGameEffects {
 
   private buildTurbulenceCrests(fields: WaterEffectFields, buffers: CrestBuffers): void {
     const resolution = this.terrain.resolution;
+    const resolutionZ = this.terrain.resolutionZ;
 
     // Keep the same deterministic anchor while a turbulent patch fluctuates.
     // Only its direction/strength ease toward the latest simulation field.
@@ -319,7 +321,7 @@ export class WaterGameEffects {
     }
 
     const candidates: number[] = [];
-    for (let z = 1; z < resolution - 1; z += 1) {
+    for (let z = 1; z < resolutionZ - 1; z += 1) {
       for (let x = 1; x < resolution - 1; x += 1) {
         const index = z * resolution + x;
         if (this.turbulenceAnchors.has(index)) continue;
@@ -385,6 +387,7 @@ export class WaterGameEffects {
 
   private buildFoamAnchors(fields: WaterEffectFields): void {
     const resolution = this.terrain.resolution;
+    const resolutionZ = this.terrain.resolutionZ;
 
     for (const [index, anchor] of this.foamAnchors) {
       if (fields.coverage[index] < 5 || fields.depth[index] < 0.000005) {
@@ -415,7 +418,7 @@ export class WaterGameEffects {
     }
 
     const candidates: number[] = [];
-    for (let z = 1; z < resolution - 1; z += 1) {
+    for (let z = 1; z < resolutionZ - 1; z += 1) {
       for (let x = 1; x < resolution - 1; x += 1) {
         const index = z * resolution + x;
         if (this.foamAnchors.has(index)
@@ -446,6 +449,7 @@ export class WaterGameEffects {
 
   private buildLakeWavelets(fields: WaterEffectFields, buffers: CrestBuffers): void {
     const resolution = this.terrain.resolution;
+    const resolutionZ = this.terrain.resolutionZ;
     for (const index of this.lakeAnchors) {
       // 锚点只有在水真正退去时才移除，避免湖泊判定的小幅波动让整条浪线闪现。
       if (fields.coverage[index] < 70 || fields.depth[index] < 0.018 || fields.lakeFactor[index] < 0.03) {
@@ -453,7 +457,7 @@ export class WaterGameEffects {
       }
     }
 
-    for (let z = 2; z < resolution - 2 && this.lakeAnchors.size < MAX_LAKE_CRESTS; z += 1) {
+    for (let z = 2; z < resolutionZ - 2 && this.lakeAnchors.size < MAX_LAKE_CRESTS; z += 1) {
       for (let x = 2; x < resolution - 2 && this.lakeAnchors.size < MAX_LAKE_CRESTS; x += 1) {
         const index = z * resolution + x;
         const lake = fields.lakeFactor[index];
@@ -495,6 +499,7 @@ export class WaterGameEffects {
 
   private buildWaterfalls(fields: WaterEffectFields, sheets: SheetBuffers, impactWaves: CrestBuffers): void {
     const resolution = this.terrain.resolution;
+    const resolutionZ = this.terrain.resolutionZ;
     type WaterfallCandidate = { index: number; target: number; energy: number; speed: number };
     const candidateMap = new Map<number, WaterfallCandidate>();
     for (let index = 0; index < fields.waterfallEnergy.length; index += 1) {
@@ -509,7 +514,7 @@ export class WaterGameEffects {
 
     // 后备视觉判定：只要真实湿区已经到达明显崖边，就直接寻找流向前方的低点。
     // 它不改变水量，只避免瞬时交换能量太小而导致高悬崖始终不显示瀑布。
-    for (let z = 2; z < resolution - 2; z += 1) {
+    for (let z = 2; z < resolutionZ - 2; z += 1) {
       for (let x = 2; x < resolution - 2; x += 1) {
         const index = z * resolution + x;
         // 崖边水层通常会因重力快速变薄；只要达到真实可见水深就允许形成瀑布。
@@ -537,7 +542,7 @@ export class WaterGameEffects {
           for (let distance = 1; distance <= WATERFALL_SEARCH_CELLS; distance += 1) {
             const candidateX = x + dx * distance;
             const candidateZ = z + dz * distance;
-            if (candidateX < 0 || candidateX >= resolution || candidateZ < 0 || candidateZ >= resolution) break;
+            if (candidateX < 0 || candidateX >= resolution || candidateZ < 0 || candidateZ >= resolutionZ) break;
             const candidate = candidateZ * resolution + candidateX;
             const drop = this.terrain.heights[index] - this.terrain.heights[candidate];
             const horizontalDistance = Math.max(this.terrain.cellSize * distance, 0.001);
@@ -1113,18 +1118,20 @@ export class WaterGameEffects {
   }
 
   private gridPosition(x: number, z: number, y: number): THREE.Vector3 {
-    const half = WORLD_CONFIG.size * 0.5;
-    return new THREE.Vector3(x * this.terrain.cellSize - half, y, z * this.terrain.cellSize - half);
+    return new THREE.Vector3(
+      x * this.terrain.cellSize - WORLD_CONFIG.sizeX * 0.5,
+      y,
+      z * this.terrain.cellSize - WORLD_CONFIG.sizeZ * 0.5,
+    );
   }
 
   private sampleSurface(worldX: number, worldZ: number, fields: WaterEffectFields): number {
-    const half = WORLD_CONFIG.size * 0.5;
-    const gx = THREE.MathUtils.clamp((worldX + half) / this.terrain.cellSize, 0, this.terrain.resolution - 1);
-    const gz = THREE.MathUtils.clamp((worldZ + half) / this.terrain.cellSize, 0, this.terrain.resolution - 1);
+    const gx = THREE.MathUtils.clamp((worldX + WORLD_CONFIG.sizeX * 0.5) / this.terrain.cellSize, 0, this.terrain.resolutionX - 1);
+    const gz = THREE.MathUtils.clamp((worldZ + WORLD_CONFIG.sizeZ * 0.5) / this.terrain.cellSize, 0, this.terrain.resolutionZ - 1);
     const x0 = Math.floor(gx);
     const z0 = Math.floor(gz);
     const x1 = Math.min(this.terrain.resolution - 1, x0 + 1);
-    const z1 = Math.min(this.terrain.resolution - 1, z0 + 1);
+    const z1 = Math.min(this.terrain.resolutionZ - 1, z0 + 1);
     const tx = gx - x0;
     const tz = gz - z0;
     const row0 = z0 * this.terrain.resolution;
@@ -1142,13 +1149,12 @@ export class WaterGameEffects {
     fields: WaterEffectFields,
     fallback: THREE.Vector2,
   ): THREE.Vector2 {
-    const half = WORLD_CONFIG.size * 0.5;
-    const gx = THREE.MathUtils.clamp((worldX + half) / this.terrain.cellSize, 0, this.terrain.resolution - 1);
-    const gz = THREE.MathUtils.clamp((worldZ + half) / this.terrain.cellSize, 0, this.terrain.resolution - 1);
+    const gx = THREE.MathUtils.clamp((worldX + WORLD_CONFIG.sizeX * 0.5) / this.terrain.cellSize, 0, this.terrain.resolutionX - 1);
+    const gz = THREE.MathUtils.clamp((worldZ + WORLD_CONFIG.sizeZ * 0.5) / this.terrain.cellSize, 0, this.terrain.resolutionZ - 1);
     const x0 = Math.floor(gx);
     const z0 = Math.floor(gz);
     const x1 = Math.min(this.terrain.resolution - 1, x0 + 1);
-    const z1 = Math.min(this.terrain.resolution - 1, z0 + 1);
+    const z1 = Math.min(this.terrain.resolutionZ - 1, z0 + 1);
     const tx = gx - x0;
     const tz = gz - z0;
     const row0 = z0 * this.terrain.resolution;
@@ -1172,13 +1178,14 @@ export class WaterGameEffects {
     if (direct.lengthSq() >= 0.0025) return direct.normalize();
 
     const resolution = this.terrain.resolution;
+    const resolutionZ = this.terrain.resolutionZ;
     const x = index % resolution;
     const z = Math.floor(index / resolution);
     let bestScore = -1;
     let bestDirection: THREE.Vector2 | undefined;
     for (let dz = -1; dz <= 1; dz += 1) {
       const sampleZ = z + dz;
-      if (sampleZ < 0 || sampleZ >= resolution) continue;
+      if (sampleZ < 0 || sampleZ >= resolutionZ) continue;
       for (let dx = -1; dx <= 1; dx += 1) {
         if (dx === 0 && dz === 0) continue;
         const sampleX = x + dx;
@@ -1200,12 +1207,13 @@ export class WaterGameEffects {
 
   private countWetNeighbours(index: number, fields: WaterEffectFields, minimumCoverage: number): number {
     const resolution = this.terrain.resolution;
+    const resolutionZ = this.terrain.resolutionZ;
     const x = index % resolution;
     const z = Math.floor(index / resolution);
     let count = 0;
     for (let dz = -1; dz <= 1; dz += 1) {
       const sampleZ = z + dz;
-      if (sampleZ < 0 || sampleZ >= resolution) continue;
+      if (sampleZ < 0 || sampleZ >= resolutionZ) continue;
       for (let dx = -1; dx <= 1; dx += 1) {
         if (dx === 0 && dz === 0) continue;
         const sampleX = x + dx;
