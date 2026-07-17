@@ -17,6 +17,18 @@ const WATER_SIMULATION_INTERVAL = 1 / 45;
 const PIXEL_RATIO_CHECK_INTERVAL = 2_000;
 const INTRO_CAMERA_DURATION_MS = 3_000;
 const PLAY_HOME_DISTANCE = 210;
+const CAMERA_SURFACE_CLEARANCE = 1.2;
+
+type GpuTimerExtension = {
+  readonly TIME_ELAPSED_EXT: number;
+  readonly GPU_DISJOINT_EXT: number;
+};
+
+function isWebGL2Context(
+  context: WebGLRenderingContext | WebGL2RenderingContext,
+): context is WebGL2RenderingContext {
+  return "createQuery" in context && "deleteQuery" in context;
+}
 
 export class AlpineWorld {
   readonly terrain: TerrainSystem;
@@ -26,6 +38,10 @@ export class AlpineWorld {
   readonly models: ModelManager;
 
   private readonly renderer: THREE.WebGLRenderer;
+  private readonly gpuTimerContext: WebGL2RenderingContext | null;
+  private readonly gpuTimerExtension: GpuTimerExtension | null;
+  private readonly pendingGpuQueries: WebGLQuery[] = [];
+  private readonly gpuQueryPool: WebGLQuery[] = [];
   private readonly scene = new THREE.Scene();
   private readonly camera: THREE.PerspectiveCamera;
   private readonly controls: OrbitControls;
@@ -59,6 +75,7 @@ export class AlpineWorld {
   private renderPixelRatio = 1;
   private statsTime = 0;
   private fps = 60;
+  private gpuFrameMs: number | null = null;
   private currentSeed: string;
   private hoverElevation = 0;
   private cursorPoint: THREE.Vector3 | null = null;
@@ -88,6 +105,11 @@ export class AlpineWorld {
     this.maxPixelRatio = Math.min(window.devicePixelRatio, 1.5);
     this.renderPixelRatio = this.maxPixelRatio;
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
+    const renderingContext = this.renderer.getContext();
+    this.gpuTimerContext = isWebGL2Context(renderingContext) ? renderingContext : null;
+    this.gpuTimerExtension = this.gpuTimerContext
+      ? this.gpuTimerContext.getExtension("EXT_disjoint_timer_query_webgl2") as GpuTimerExtension | null
+      : null;
     this.renderer.setPixelRatio(this.renderPixelRatio);
     this.renderer.setSize(container.clientWidth, container.clientHeight);
     this.renderer.shadowMap.enabled = true;
@@ -447,6 +469,10 @@ export class AlpineWorld {
     this.ambientAudio.dispose();
     this.brushCursor.geometry.dispose();
     this.brushCursor.material.dispose();
+    for (const query of this.pendingGpuQueries) this.gpuTimerContext?.deleteQuery(query);
+    for (const query of this.gpuQueryPool) this.gpuTimerContext?.deleteQuery(query);
+    this.pendingGpuQueries.length = 0;
+    this.gpuQueryPool.length = 0;
     this.renderer.dispose();
     this.renderer.domElement.remove();
   }
@@ -782,6 +808,56 @@ export class AlpineWorld {
     this.renderer.setSize(width, height, false);
   }
 
+  private beginGpuFrameTimer(): WebGLQuery | null {
+    const extension = this.gpuTimerExtension;
+    const gl = this.gpuTimerContext;
+    if (!extension || !gl) return null;
+    this.resolveGpuFrameTimers(gl, extension);
+    if (this.pendingGpuQueries.length >= 4) return null;
+
+    const query = this.gpuQueryPool.pop() ?? gl.createQuery();
+    if (!query) return null;
+    try {
+      gl.beginQuery(extension.TIME_ELAPSED_EXT, query);
+      return query;
+    } catch {
+      gl.deleteQuery(query);
+      return null;
+    }
+  }
+
+  private endGpuFrameTimer(query: WebGLQuery | null): void {
+    const gl = this.gpuTimerContext;
+    if (!query || !this.gpuTimerExtension || !gl) return;
+    try {
+      gl.endQuery(this.gpuTimerExtension.TIME_ELAPSED_EXT);
+      this.pendingGpuQueries.push(query);
+    } catch {
+      gl.deleteQuery(query);
+    }
+  }
+
+  private resolveGpuFrameTimers(gl: WebGL2RenderingContext, extension: GpuTimerExtension): void {
+    if (gl.getParameter(extension.GPU_DISJOINT_EXT)) {
+      for (const query of this.pendingGpuQueries) gl.deleteQuery(query);
+      this.pendingGpuQueries.length = 0;
+      return;
+    }
+
+    while (this.pendingGpuQueries.length > 0) {
+      const query = this.pendingGpuQueries[0];
+      if (!gl.getQueryParameter(query, gl.QUERY_RESULT_AVAILABLE)) break;
+      const elapsedNanoseconds = Number(gl.getQueryParameter(query, gl.QUERY_RESULT));
+      this.pendingGpuQueries.shift();
+      this.gpuQueryPool.push(query);
+      const sampleMs = elapsedNanoseconds / 1_000_000;
+      if (!Number.isFinite(sampleMs)) continue;
+      this.gpuFrameMs = this.gpuFrameMs === null
+        ? sampleMs
+        : THREE.MathUtils.lerp(this.gpuFrameMs, sampleMs, 0.12);
+    }
+  }
+
   private animate = (time = performance.now()): void => {
     if (this.disposed) return;
     this.frame = requestAnimationFrame(this.animate);
@@ -794,6 +870,10 @@ export class AlpineWorld {
     else {
       this.controls.update();
       this.constrainPlayOrbitTarget();
+    }
+    if (!this.showcaseActive) {
+      this.ocean.update(time);
+      this.resolveCameraSurfaceCollision();
     }
     const audioFocus = this.controls.target;
     this.ambientAudio.update(deltaTime, {
@@ -819,7 +899,6 @@ export class AlpineWorld {
     }
     if (this.showcaseActive) this.waterShowcase.update(time);
     else {
-      this.ocean.update(time);
       this.skyWildlife.update(deltaTime, time);
       this.water.updateMarker(time, this.waterActive);
 
@@ -835,15 +914,25 @@ export class AlpineWorld {
 
     if (time - this.statsTime > 250) {
       this.statsTime = time;
+      const waterPerformance = this.water.performance;
       this.handlers.onStats?.({
         elevation: this.hoverElevation,
         peak: this.terrain.maxHeight,
         waterVolume: this.water.volume,
         wateredYellowPercent: this.terrain.getWateredYellowPercentage(),
         fps: Math.min(99, Math.round(this.fps)),
+        waterPhysicsMs: waterPerformance.physicsMs,
+        waterGeometryMs: waterPerformance.geometryMs,
+        waterTopologyMs: waterPerformance.topologyMs,
+        gpuFrameMs: this.gpuFrameMs,
       });
     }
-    this.renderer.render(this.showcaseActive ? this.waterShowcase.scene : this.scene, this.camera);
+    const gpuQuery = this.beginGpuFrameTimer();
+    try {
+      this.renderer.render(this.showcaseActive ? this.waterShowcase.scene : this.scene, this.camera);
+    } finally {
+      this.endGpuFrameTimer(gpuQuery);
+    }
   };
 
   /** Keep GPU cost stable by adjusting only the internal render resolution. */
@@ -858,6 +947,27 @@ export class AlpineWorld {
     if (Math.abs(nextPixelRatio - this.renderPixelRatio) < 0.001) return;
     this.renderPixelRatio = nextPixelRatio;
     this.renderer.setPixelRatio(this.renderPixelRatio);
+  }
+
+  private resolveCameraSurfaceCollision(): void {
+    const { x, y, z } = this.camera.position;
+    const terrainHalfX = WORLD_CONFIG.sizeX * 0.5;
+    const terrainHalfZ = WORLD_CONFIG.sizeZ * 0.5;
+    let surfaceHeight = Number.NEGATIVE_INFINITY;
+
+    if (Math.abs(x) <= terrainHalfX && Math.abs(z) <= terrainHalfZ) {
+      surfaceHeight = this.terrain.surfaceHeightAt(x, z);
+    }
+
+    const oceanHeight = this.ocean.surfaceHeightAt(x, z);
+    if (oceanHeight !== null) surfaceHeight = Math.max(surfaceHeight, oceanHeight);
+    if (!Number.isFinite(surfaceHeight)) return;
+
+    const minimumCameraY = surfaceHeight + CAMERA_SURFACE_CLEARANCE;
+    if (y < minimumCameraY) {
+      this.camera.position.y = minimumCameraY;
+      this.camera.lookAt(this.controls.target);
+    }
   }
 
   private updateIrrigation(elapsedSeconds = IRRIGATION_UPDATE_INTERVAL): void {

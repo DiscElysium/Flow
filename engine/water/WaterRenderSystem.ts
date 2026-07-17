@@ -33,7 +33,7 @@ type GeometryBuffers = {
   heightOffsets: number[];
 };
 
-const SHORE_ISO_LEVEL = 0.22;
+export const WATER_SHORE_ISO_LEVEL = 0.22;
 const SHORE_SKIRT_DEPTH = 0.075;
 const SHORE_SKIRT_INSET = 0.045;
 const SHORE_SKIRT_TOP_DROP = 0.018;
@@ -210,7 +210,7 @@ export class WaterRenderSystem {
         for (const triangle of terrainTriangles) {
           const contour = this.triangleContourSegment(...triangle);
           if (contour) {
-            const wetSamples = triangle.filter((point) => point.coverage >= SHORE_ISO_LEVEL);
+            const wetSamples = triangle.filter((point) => point.coverage >= WATER_SHORE_ISO_LEVEL);
             const wetCenterX = wetSamples.reduce((sum, point) => sum + point.x, 0) / wetSamples.length;
             const wetCenterZ = wetSamples.reduce((sum, point) => sum + point.z, 0) / wetSamples.length;
             this.appendShoreSkirt(contour[0], contour[1], wetCenterX, wetCenterZ, shoreSkirt);
@@ -259,8 +259,8 @@ export class WaterRenderSystem {
     for (let index = 0; index < input.length; index += 1) {
       const current = input[index];
       const previous = input[(index + input.length - 1) % input.length];
-      const currentInside = current.coverage >= SHORE_ISO_LEVEL;
-      const previousInside = previous.coverage >= SHORE_ISO_LEVEL;
+      const currentInside = current.coverage >= WATER_SHORE_ISO_LEVEL;
+      const previousInside = previous.coverage >= WATER_SHORE_ISO_LEVEL;
       if (currentInside !== previousInside) output.push(this.interpolate(previous, current));
       if (currentInside) output.push(current);
     }
@@ -270,7 +270,7 @@ export class WaterRenderSystem {
   private triangleContourSegment(a: Sample, b: Sample, c: Sample): [Sample, Sample] | null {
     const intersections: Sample[] = [];
     for (const [start, end] of [[a, b], [b, c], [c, a]] as Array<[Sample, Sample]>) {
-      if ((start.coverage >= SHORE_ISO_LEVEL) !== (end.coverage >= SHORE_ISO_LEVEL)) {
+      if ((start.coverage >= WATER_SHORE_ISO_LEVEL) !== (end.coverage >= WATER_SHORE_ISO_LEVEL)) {
         intersections.push(this.interpolate(start, end));
       }
     }
@@ -280,7 +280,7 @@ export class WaterRenderSystem {
   private interpolate(a: Sample, b: Sample): Sample {
     const range = b.coverage - a.coverage;
     const amount = Math.abs(range) > 0.00001
-      ? THREE.MathUtils.clamp((SHORE_ISO_LEVEL - a.coverage) / range, 0, 1)
+      ? THREE.MathUtils.clamp((WATER_SHORE_ISO_LEVEL - a.coverage) / range, 0, 1)
       : 0.5;
     return {
       x: THREE.MathUtils.lerp(a.x, b.x, amount),
@@ -291,7 +291,7 @@ export class WaterRenderSystem {
       sourceMix: amount,
       heightOffset: THREE.MathUtils.lerp(a.heightOffset, b.heightOffset, amount),
       terrainY: THREE.MathUtils.lerp(a.terrainY, b.terrainY, amount),
-      coverage: SHORE_ISO_LEVEL,
+      coverage: WATER_SHORE_ISO_LEVEL,
       depth: THREE.MathUtils.lerp(a.depth, b.depth, amount),
       flowX: THREE.MathUtils.lerp(a.flowX, b.flowX, amount),
       flowZ: THREE.MathUtils.lerp(a.flowZ, b.flowZ, amount),
@@ -433,8 +433,26 @@ export class WaterRenderSystem {
           float waveB = sin(dot(warped, normalize(vec2(-0.27, 0.96))) * 1.78 - uWaterTime * 0.57 + 1.7);
           float waveC = sin(dot(warped, normalize(vec2(0.72, -0.69))) * 2.46 - uWaterTime * 0.83 + 3.1);
           float waveD = sin(dot(warped, normalize(vec2(-0.94, -0.34))) * 3.18 - uWaterTime * 0.39 + 0.6);
-          vLakeWaveHeight = (waveA * 0.092 + waveB * 0.058 + waveC * 0.034 + waveD * 0.018) * lakeMask;
-          transformed.y += max(-0.055, vLakeWaveHeight);
+          // Broad wave groups now have a lifecycle instead of permanently
+          // deforming the same low-poly facets. Each envelope travels slowly
+          // across the lake, rises to full strength, then fades back to flat.
+          float packetClockA = 0.5 + 0.5 * sin(
+            dot(warped, normalize(vec2(-0.52, 0.85))) * 0.095
+            - uWaterTime * 0.22
+            + domainA * 0.24
+          );
+          float packetClockB = 0.5 + 0.5 * sin(
+            dot(warped, normalize(vec2(0.81, 0.59))) * 0.083
+            + uWaterTime * 0.17
+            + domainB * 0.21
+            + 2.1
+          );
+          float packetLifeA = smoothstep(0.14, 0.82, packetClockA);
+          float packetLifeB = smoothstep(0.2, 0.88, packetClockB);
+          float calmRipple = waveC * 0.006 + waveD * 0.003;
+          float transientWaves = waveA * 0.056 * packetLifeA + waveB * 0.032 * packetLifeB;
+          vLakeWaveHeight = (calmRipple + transientWaves) * lakeMask;
+          transformed.y += vLakeWaveHeight;
           // Strong drop/convergence energy makes a few broad low-poly facets
           // lift locally. The coverage sample fades this before the shoreline,
           // so turbulence cannot bring back the old flashing water edge.
@@ -462,7 +480,7 @@ export class WaterRenderSystem {
           diffuseColor.a *= waterEdgeCoverage;
           float lakeWeight = clamp(vWaterLake, 0.0, 1.0);
           float variation = 0.5 + 0.5 * sin(vWaterWorldPosition.x * 0.37 + vWaterWorldPosition.z * 0.21 + sin(vWaterWorldPosition.z * 0.29) * 1.4);
-          float lakeLight = smoothstep(0.038, 0.125, vLakeWaveHeight) * mix(0.04, 0.13, variation) * lakeWeight;
+          float lakeLight = smoothstep(0.018, 0.075, vLakeWaveHeight) * mix(0.04, 0.13, variation) * lakeWeight;
           diffuseColor.rgb = mix(diffuseColor.rgb, min(vec3(1.0), diffuseColor.rgb + vec3(0.06, 0.11, 0.12)), lakeLight);
           vec3 waterDx = dFdx(vWaterWorldPosition);
           vec3 waterDy = dFdy(vWaterWorldPosition);

@@ -18,6 +18,10 @@ export type WorldStats = {
   waterVolume: number;
   wateredYellowPercent: number;
   fps: number;
+  waterPhysicsMs: number;
+  waterGeometryMs: number;
+  waterTopologyMs: number;
+  gpuFrameMs: number | null;
 };
 
 export type WorldEventHandlers = {

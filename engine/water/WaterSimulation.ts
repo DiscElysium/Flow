@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { WORLD_CONFIG } from "@/engine/config";
 import type { TerrainSystem } from "@/engine/terrain/TerrainSystem";
-import { WaterRenderSystem } from "@/engine/water/WaterRenderSystem";
+import { WATER_SHORE_ISO_LEVEL, WaterRenderSystem } from "@/engine/water/WaterRenderSystem";
 
 const MIN_VISIBLE_DEPTH = 0.003;
 const VISUAL_EDGE_DEPTH = 0.0015;
@@ -17,6 +17,39 @@ const GRAVITY_PRIORITY_FULL = 0.48;
 const FLOW_DROP_LOOKAHEAD_CELLS = 5;
 const WATER_RENDER_OFFSET = 0.025;
 const MIN_VISUAL_WATER_DEPTH = 0.012;
+const RENDER_TOPOLOGY_INTERVAL = 1 / 7;
+const WATER_SHORE_ISO_BYTE = Math.round(WATER_SHORE_ISO_LEVEL * 255);
+// Rebuild only when coverage crosses a threshold that changes shoreline or
+// effect eligibility. Intermediate alpha changes remain texture-only.
+const WATER_COVERAGE_REBUILD_THRESHOLDS = [
+  5,
+  WATER_SHORE_ISO_BYTE,
+  70,
+  75,
+  85,
+  95,
+  100,
+  110,
+  120,
+  150,
+  175,
+  190,
+] as const;
+
+function coverageState(value: number): number {
+  let state = 0;
+  while (
+    state < WATER_COVERAGE_REBUILD_THRESHOLDS.length
+    && value >= WATER_COVERAGE_REBUILD_THRESHOLDS[state]
+  ) state += 1;
+  return state;
+}
+
+export type WaterPerformanceStats = {
+  physicsMs: number;
+  geometryMs: number;
+  topologyMs: number;
+};
 
 export class WaterSimulation {
   readonly mesh: THREE.Mesh<THREE.BufferGeometry, THREE.ShaderMaterial>;
@@ -62,6 +95,12 @@ export class WaterSimulation {
   private readonly renderSystem: WaterRenderSystem;
   private readonly marker = new THREE.Group();
   private renderRefreshElapsed = 0;
+  private renderTopologyDirty = false;
+  private readonly performanceStats: WaterPerformanceStats = {
+    physicsMs: 0,
+    geometryMs: 0,
+    topologyMs: 0,
+  };
   private sourceIndex = 0;
   private sourceEditing = false;
 
@@ -180,19 +219,49 @@ export class WaterSimulation {
     this.previousTerrain.set(this.terrain.heights);
     this.createSourceMarker();
     this.setSource(this.terrain.sourceIndex);
-    this.updateGeometry();
-    this.rebuildRenderGeometry();
+    this.refreshRenderImmediately();
   }
 
   step(deltaTime: number, flowRate: number, flowDelay: number): void {
     const safeDelta = Math.min(deltaTime, 0.045);
-    const subDelta = safeDelta / WORLD_CONFIG.water.substeps;
+    const physicsStart = performance.now();
     const safeFlowDelay = THREE.MathUtils.clamp(flowDelay, 0.02, 0.5);
+    this.simulatePhysicsStep(safeDelta, flowRate, safeFlowDelay);
+    this.recordPerformance("physicsMs", performance.now() - physicsStart);
+
+    const geometryStart = performance.now();
+    if (this.updateGeometry()) this.renderTopologyDirty = true;
+    this.renderSystem.updateDynamicFields(
+      this.renderSurfaceHeight,
+      this.depth,
+      this.flowX,
+      this.flowZ,
+      this.flowSpeed,
+      this.turbulence,
+      this.lakeFactor,
+    );
+    this.recordPerformance("geometryMs", performance.now() - geometryStart);
+
+    this.renderRefreshElapsed = Math.min(
+      RENDER_TOPOLOGY_INTERVAL,
+      this.renderRefreshElapsed + safeDelta,
+    );
+    if (this.renderTopologyDirty && this.renderRefreshElapsed >= RENDER_TOPOLOGY_INTERVAL) {
+      const topologyStart = performance.now();
+      this.rebuildRenderGeometry();
+      this.recordPerformance("topologyMs", performance.now() - topologyStart);
+      this.renderTopologyDirty = false;
+      this.renderRefreshElapsed = 0;
+    }
+  }
+
+  private simulatePhysicsStep(deltaTime: number, flowRate: number, flowDelay: number): void {
+    const subDelta = deltaTime / WORLD_CONFIG.water.substeps;
     this.resetFrameAccumulators();
 
     // ── 指数衰减 recentInflow，解锁随时间的旧流入水量 ──
     // 每经过一个停留时间，约 63% 的锁定水被解锁。
-    const decay = Math.exp(-safeDelta / safeFlowDelay);
+    const decay = Math.exp(-deltaTime / flowDelay);
     for (let i = 0; i < this.recentInflow.length; i += 1) {
       this.recentInflow[i] *= decay;
     }
@@ -208,8 +277,12 @@ export class WaterSimulation {
       for (let z = 0; z < this.resolutionZ; z += 1) {
         for (let x = 0; x < this.resolutionX; x += 1) {
           const index = z * this.resolution + x;
-          if (x < this.resolutionX - 1) this.exchange(index, index + 1);
-          if (z < this.resolutionZ - 1) this.exchange(index, index + this.resolution);
+          if (x < this.resolutionX - 1) {
+            this.exchange(index, index + 1);
+          }
+          if (z < this.resolutionZ - 1) {
+            this.exchange(index, index + this.resolution);
+          }
         }
       }
       for (let i = 0; i < this.depth.length; i += 1) {
@@ -228,29 +301,16 @@ export class WaterSimulation {
         if (this.recentInflow[i] > this.depth[i]) this.recentInflow[i] = this.depth[i];
       }
     }
-    this.updateFlowState(safeDelta);
-    this.updateGeometry();
-    // Match main's smoothness: visible water heights follow every simulation
-    // frame. Only the more expensive shoreline topology remains rate-limited.
-    this.renderSystem.updateDynamicFields(
-      this.renderSurfaceHeight,
-      this.depth,
-      this.flowX,
-      this.flowZ,
-      this.flowSpeed,
-      this.turbulence,
-      this.lakeFactor,
-    );
-    this.renderRefreshElapsed += safeDelta;
-    if (this.renderRefreshElapsed >= 0.05) {
-      this.renderRefreshElapsed %= 0.05;
-      this.rebuildRenderGeometry();
-    }
+    this.updateFlowState(deltaTime);
   }
 
   /** 暴露 ShaderMaterial 以便外部实时调参与调试 */
   get waterMaterial(): THREE.ShaderMaterial {
     return this.mesh.material as THREE.ShaderMaterial;
+  }
+
+  get performance(): Readonly<WaterPerformanceStats> {
+    return this.performanceStats;
   }
 
   getDepthSnapshot(): number[] {
@@ -264,8 +324,7 @@ export class WaterSimulation {
     this.previousTerrain.set(this.terrain.heights);
     this.resetDynamicState();
     this.setSource(this.terrain.sourceIndex);
-    this.updateGeometry();
-    this.rebuildRenderGeometry();
+    this.refreshRenderImmediately();
   }
 
   clear(): void {
@@ -274,9 +333,9 @@ export class WaterSimulation {
     this.visualCoverageRaw.fill(0);
     this.visualCoverageBlur.fill(0);
     this.visualCoveragePixels.fill(0);
+    this.visualCoverageTexture.needsUpdate = true;
     this.resetDynamicState();
-    this.updateGeometry();
-    this.rebuildRenderGeometry();
+    this.refreshRenderImmediately();
   }
 
   syncTerrain(preserveSurface = true): void {
@@ -296,8 +355,7 @@ export class WaterSimulation {
     }
     this.resetDynamicState();
     this.previousTerrain.set(this.terrain.heights);
-    this.updateGeometry();
-    this.rebuildRenderGeometry();
+    this.refreshRenderImmediately();
     this.setSource(this.terrain.sourceIndex);
   }
 
@@ -742,7 +800,9 @@ export class WaterSimulation {
     return geometry;
   }
 
-  private updateVisualCoverage(): void {
+  private updateVisualCoverage(): boolean {
+    let textureChanged = false;
+    let topologyChanged = false;
     // Unlike the old binary wet/dry mask, coverage now approaches a continuous
     // depth target every frame. The persistent surface shader samples this
     // field bilinearly, so a front advances inside a cell instead of appearing
@@ -815,14 +875,21 @@ export class WaterSimulation {
         const connectionBridge = bridgesWetSegments ? 0.82 : 0;
         // 保住很窄的单格水流，同时用邻域值把尖锐的三角形边缘圆钝化。
         const coverage = Math.max(this.visualCoverageRaw[index] * 0.88, blurred, connectionBridge);
-        this.visualCoveragePixels[index] = Math.round(THREE.MathUtils.clamp(coverage, 0, 1) * 255);
+        const previousPixel = this.visualCoveragePixels[index];
+        const nextPixel = Math.round(THREE.MathUtils.clamp(coverage, 0, 1) * 255);
+        if (nextPixel !== previousPixel) {
+          textureChanged = true;
+          if (coverageState(previousPixel) !== coverageState(nextPixel)) topologyChanged = true;
+          this.visualCoveragePixels[index] = nextPixel;
+        }
       }
     }
-    this.visualCoverageTexture.needsUpdate = true;
+    if (textureChanged) this.visualCoverageTexture.needsUpdate = true;
+    return topologyChanged;
   }
 
-  private updateGeometry(): void {
-    this.updateVisualCoverage();
+  private updateGeometry(): boolean {
+    const topologyChanged = this.updateVisualCoverage();
 
     for (let i = 0; i < this.depth.length; i += 1) {
       const targetSurfaceHeight = this.terrain.heights[i]
@@ -831,10 +898,13 @@ export class WaterSimulation {
       if (this.visualSurfaceHeight[i] === 0 || this.depth[i] <= VISUAL_EDGE_DEPTH) {
         this.visualSurfaceHeight[i] = targetSurfaceHeight;
       } else {
-        // 湖泊水位使用更强的视觉平滑，避免物理格点的微量交换被放大成颤抖。
         const lakeStability = THREE.MathUtils.clamp(this.lakeFactor[i], 0, 1);
         const response = THREE.MathUtils.lerp(0.34, 0.055, lakeStability);
-        this.visualSurfaceHeight[i] = THREE.MathUtils.lerp(this.visualSurfaceHeight[i], targetSurfaceHeight, response);
+        this.visualSurfaceHeight[i] = THREE.MathUtils.lerp(
+          this.visualSurfaceHeight[i],
+          targetSurfaceHeight,
+          response,
+        );
       }
     }
 
@@ -870,6 +940,24 @@ export class WaterSimulation {
       }
     }
 
+    // The hidden legacy mesh is intentionally left untouched. It remains only
+    // as a compatibility material/data carrier; the visible render system owns
+    // all dynamic vertex uploads.
+    return topologyChanged;
+  }
+
+  private refreshRenderImmediately(): void {
+    this.updateGeometry();
+    this.rebuildRenderGeometry();
+    this.renderTopologyDirty = false;
+    this.renderRefreshElapsed = 0;
+  }
+
+  private recordPerformance(metric: keyof WaterPerformanceStats, sampleMs: number): void {
+    const current = this.performanceStats[metric];
+    this.performanceStats[metric] = current === 0
+      ? sampleMs
+      : THREE.MathUtils.lerp(current, sampleMs, 0.12);
   }
 
   private rebuildRenderGeometry(): void {

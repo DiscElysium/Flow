@@ -88,12 +88,13 @@ export class WaterGameEffects {
   private readonly impactWaveMesh = new THREE.Mesh(new THREE.BufferGeometry(), this.createCrestMaterial("#eef7f3", true, false, 0.58));
   private readonly waterfallMesh = new THREE.Mesh(new THREE.BufferGeometry(), this.createWaterfallMaterial());
   private readonly bubbleGeometry = new THREE.IcosahedronGeometry(1, 0);
-  private readonly bubbleMaterial = new THREE.MeshBasicMaterial({
-    color: "#e5f3ef",
-    transparent: true,
-    opacity: 0.86,
-    depthWrite: false,
-  });
+  private readonly bubbleLife = new THREE.InstancedBufferAttribute(new Float32Array(MAX_BUBBLES * 2), 2);
+  private readonly bubbleRadial = new THREE.InstancedBufferAttribute(new Float32Array(MAX_BUBBLES * 2), 2);
+  private readonly bubbleFlow = new THREE.InstancedBufferAttribute(new Float32Array(MAX_BUBBLES * 2), 2);
+  private readonly bubbleMotion = new THREE.InstancedBufferAttribute(new Float32Array(MAX_BUBBLES * 4), 4);
+  private readonly bubbleShape = new THREE.InstancedBufferAttribute(new Float32Array(MAX_BUBBLES * 4), 4);
+  private readonly bubbleColor = new THREE.InstancedBufferAttribute(new Float32Array(MAX_BUBBLES * 3), 3);
+  private readonly bubbleMaterial = this.createBubbleMaterial();
   private readonly bubbles = new THREE.InstancedMesh(this.bubbleGeometry, this.bubbleMaterial, MAX_BUBBLES);
   private readonly impacts: Impact[] = [];
   private readonly riverAnchors = new Map<number, RiverAnchor>();
@@ -101,9 +102,6 @@ export class WaterGameEffects {
   private readonly foamAnchors = new Map<number, FoamAnchor>();
   private readonly lakeAnchors = new Set<number>();
   private readonly matrix = new THREE.Matrix4();
-  private readonly position = new THREE.Vector3();
-  private readonly scale = new THREE.Vector3();
-  private readonly quaternion = new THREE.Quaternion();
   private readonly color = new THREE.Color();
 
   constructor(private readonly scene: THREE.Scene, private readonly terrain: TerrainSystem) {
@@ -119,6 +117,17 @@ export class WaterGameEffects {
     this.waterfallMesh.renderOrder = 7;
     this.impactWaveMesh.renderOrder = 9;
     this.bubbles.renderOrder = 10;
+    for (const [name, attribute] of [
+      ["bubbleLife", this.bubbleLife],
+      ["bubbleRadial", this.bubbleRadial],
+      ["bubbleFlow", this.bubbleFlow],
+      ["bubbleMotion", this.bubbleMotion],
+      ["bubbleShape", this.bubbleShape],
+      ["bubbleColor", this.bubbleColor],
+    ] as const) {
+      attribute.setUsage(THREE.DynamicDrawUsage);
+      this.bubbleGeometry.setAttribute(name, attribute);
+    }
     // 实例位置会随真实瀑布落点持续变化，不能使用初始单位几何的包围球裁剪。
     this.bubbles.frustumCulled = false;
     this.bubbles.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -135,9 +144,7 @@ export class WaterGameEffects {
   }
 
   update(time: number): void {
-    const seconds = time * 0.001;
-    this.timeUniform.value = seconds;
-    this.updateBubbles(seconds);
+    this.timeUniform.value = time * 0.001;
   }
 
   rebuild(fields: WaterEffectFields): void {
@@ -152,6 +159,7 @@ export class WaterGameEffects {
     this.buildTurbulenceCrests(fields, turbulence);
     this.buildLakeWavelets(fields, lake);
     this.buildFoamAnchors(fields);
+    this.rebuildBubbles();
 
     this.replaceCrestGeometry(this.riverMesh, river);
     this.replaceCrestGeometry(this.turbulenceMesh, turbulence);
@@ -840,33 +848,66 @@ export class WaterGameEffects {
     }
   }
 
-  private updateBubbles(seconds: number): void {
+  private rebuildBubbles(): void {
     let cursor = 0;
+    const writeBubble = (
+      center: THREE.Vector3,
+      phase: number,
+      lifetime: number,
+      radialX: number,
+      radialZ: number,
+      flowX: number,
+      flowZ: number,
+      riseLinear: number,
+      riseArc: number,
+      flowDrift: number,
+      sideways: number,
+      scaleXZ: number,
+      scaleY: number,
+      spreadBase: number,
+      spreadGrowth: number,
+      color: THREE.ColorRepresentation,
+    ): void => {
+      this.matrix.makeTranslation(center.x, center.y, center.z);
+      this.bubbles.setMatrixAt(cursor, this.matrix);
+      this.bubbleLife.setXY(cursor, phase, 1 / lifetime);
+      this.bubbleRadial.setXY(cursor, radialX, radialZ);
+      this.bubbleFlow.setXY(cursor, flowX, flowZ);
+      this.bubbleMotion.setXYZW(cursor, riseLinear, riseArc, flowDrift, sideways);
+      this.bubbleShape.setXYZW(cursor, scaleXZ, scaleY, spreadBase, spreadGrowth);
+      this.color.set(color);
+      this.bubbleColor.setXYZ(cursor, this.color.r, this.color.g, this.color.b);
+      cursor += 1;
+    };
+
     for (const impact of this.impacts) {
-      // 与测试场一致，用一群短生命周期的低模小浪花持续表现落点的“沸腾”，数量由冲击和流速共同决定。
+      // Store only stable spawn data. The shader owns age, spreading, rising,
+      // scale and opacity for the entire lifetime of each low-poly lobe.
       const count = Math.min(40, 20 + Math.round(impact.energy * 12 + impact.speed * 8));
       for (let i = 0; i < count && cursor < MAX_BUBBLES; i += 1) {
         const phase = this.hash(impact.seed, i, 61);
         const lifetime = THREE.MathUtils.lerp(0.68, 1.45, this.hash(impact.seed, i, 67));
-        const age = (seconds / lifetime + phase) % 1;
-        const envelope = Math.pow(Math.sin(age * Math.PI), 0.48);
         const angle = this.hash(impact.seed, i, 71) * Math.PI * 2;
         const distance = Math.sqrt(this.hash(impact.seed, i, 73)) * this.terrain.cellSize * (0.78 + impact.energy * 1.85);
-        const spread = 0.6 + age * 0.5;
-        const rise = age * THREE.MathUtils.lerp(0.1, 0.48, this.hash(impact.seed, i, 79)) * (0.78 + impact.energy * 0.48);
-        this.position.set(
-          impact.center.x + Math.cos(angle) * distance * spread,
-          impact.center.y + rise + Math.sin(age * Math.PI) * 0.06,
-          impact.center.z + Math.sin(angle) * distance * spread,
+        const size = THREE.MathUtils.lerp(0.06, 0.2, this.hash(impact.seed, i, 83));
+        writeBubble(
+          impact.center,
+          phase,
+          lifetime,
+          Math.cos(angle) * distance,
+          Math.sin(angle) * distance,
+          0,
+          0,
+          THREE.MathUtils.lerp(0.1, 0.48, this.hash(impact.seed, i, 79)) * (0.78 + impact.energy * 0.48),
+          0.06,
+          0,
+          0,
+          size * 1.22,
+          size * 0.78,
+          0.6,
+          0.5,
+          i % 3 === 0 ? "#cce8e3" : i % 3 === 1 ? "#edf7f3" : "#dcefeb",
         );
-        const size = THREE.MathUtils.lerp(0.06, 0.2, this.hash(impact.seed, i, 83)) * envelope;
-        this.scale.set(size * 1.22, size * 0.78, size * 1.22);
-        this.quaternion.setFromEuler(new THREE.Euler(age * 1.7, phase * 8 + age * 2.1, age * 0.8));
-        this.matrix.compose(this.position, this.quaternion, this.scale);
-        this.bubbles.setMatrixAt(cursor, this.matrix);
-        this.color.set(i % 3 === 0 ? "#cce8e3" : i % 3 === 1 ? "#edf7f3" : "#dcefeb");
-        this.bubbles.setColorAt(cursor, this.color);
-        cursor += 1;
       }
     }
 
@@ -880,41 +921,97 @@ export class WaterGameEffects {
       for (let i = 0; i < count && cursor < MAX_BUBBLES; i += 1) {
         const phase = this.hash(index, i, 109);
         const lifetime = THREE.MathUtils.lerp(0.85, 1.6, this.hash(index, i, 113));
-        const age = (seconds / lifetime + phase) % 1;
-        const envelope = Math.pow(Math.sin(age * Math.PI), 0.48);
         const angle = this.hash(index, i, 127) * Math.PI * 2;
         const radius = this.terrain.cellSize * (0.14 + foam.strength * 0.34);
         const distance = Math.sqrt(this.hash(index, i, 131)) * radius;
-        const spread = 0.58 + age * 0.34;
-        const flowDrift = age * this.terrain.cellSize * (0.05 + foam.strength * 0.13);
-        const sideways = Math.sin(age * Math.PI * 2 + phase * 9) * this.terrain.cellSize * 0.035;
-        const cos = Math.cos(angle);
-        const sin = Math.sin(angle);
-        this.position.set(
-          foam.center.x + cos * distance * spread - sin * sideways + directionX * flowDrift,
-          foam.center.y
-            + Math.sin(age * Math.PI)
-              * THREE.MathUtils.lerp(0.022, 0.075, this.hash(index, i, 137))
-              * (0.62 + foam.strength * 0.38),
-          foam.center.z + sin * distance * spread + cos * sideways + directionZ * flowDrift,
-        );
         const size = THREE.MathUtils.lerp(0.045, 0.13, this.hash(index, i, 139))
-          * THREE.MathUtils.lerp(0.72, 1, foam.strength)
-          * envelope;
-        this.scale.set(size * 1.18, size * 0.82, size * 1.18);
-        this.quaternion.setFromEuler(new THREE.Euler(age * 1.7, phase * 8 + age * 2.1, age * 0.8));
-        this.matrix.compose(this.position, this.quaternion, this.scale);
-        this.bubbles.setMatrixAt(cursor, this.matrix);
+          * THREE.MathUtils.lerp(0.72, 1, foam.strength);
         const shade = (index + i) % 3;
-        this.color.set(shade === 0 ? "#cce8e3" : shade === 1 ? "#edf7f3" : "#dcefeb");
-        this.bubbles.setColorAt(cursor, this.color);
-        cursor += 1;
+        writeBubble(
+          foam.center,
+          phase,
+          lifetime,
+          Math.cos(angle) * distance,
+          Math.sin(angle) * distance,
+          directionX,
+          directionZ,
+          0,
+          THREE.MathUtils.lerp(0.022, 0.075, this.hash(index, i, 137)) * (0.62 + foam.strength * 0.38),
+          this.terrain.cellSize * (0.05 + foam.strength * 0.13),
+          this.terrain.cellSize * 0.035,
+          size * 1.18,
+          size * 0.82,
+          0.58,
+          0.34,
+          shade === 0 ? "#cce8e3" : shade === 1 ? "#edf7f3" : "#dcefeb",
+        );
       }
     }
     this.bubbles.count = cursor;
     this.bubbles.visible = cursor > 0;
     this.bubbles.instanceMatrix.needsUpdate = true;
-    if (this.bubbles.instanceColor) this.bubbles.instanceColor.needsUpdate = true;
+    for (const attribute of [
+      this.bubbleLife,
+      this.bubbleRadial,
+      this.bubbleFlow,
+      this.bubbleMotion,
+      this.bubbleShape,
+      this.bubbleColor,
+    ]) attribute.needsUpdate = true;
+  }
+
+  private createBubbleMaterial(): THREE.ShaderMaterial {
+    return new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      uniforms: {
+        uTime: this.timeUniform,
+      },
+      vertexShader: `
+        uniform float uTime;
+        attribute vec2 bubbleLife;
+        attribute vec2 bubbleRadial;
+        attribute vec2 bubbleFlow;
+        attribute vec4 bubbleMotion;
+        attribute vec4 bubbleShape;
+        attribute vec3 bubbleColor;
+        varying vec3 vBubbleColor;
+        varying float vBubbleAlpha;
+        void main() {
+          float age = fract(uTime * bubbleLife.y + bubbleLife.x);
+          float lifeWave = max(0.0, sin(age * 3.14159265));
+          float envelope = pow(lifeWave, 0.48);
+          vec2 radialDirection = length(bubbleRadial) > 0.0001
+            ? normalize(bubbleRadial)
+            : vec2(1.0, 0.0);
+          vec2 sideDirection = vec2(-radialDirection.y, radialDirection.x);
+          vec2 travel = bubbleRadial * (bubbleShape.z + age * bubbleShape.w)
+            + bubbleFlow * age * bubbleMotion.z
+            + sideDirection * sin(age * 6.2831853 + bubbleLife.x * 9.0) * bubbleMotion.w;
+
+          vec3 p = position;
+          float spin = bubbleLife.x * 6.2831853 + age * 2.1;
+          mat2 spinMatrix = mat2(cos(spin), -sin(spin), sin(spin), cos(spin));
+          p.xz = spinMatrix * p.xz;
+          p.xz *= bubbleShape.x * envelope;
+          p.y *= bubbleShape.y * envelope;
+          p.xz += travel;
+          p.y += age * bubbleMotion.x + lifeWave * bubbleMotion.y;
+
+          vBubbleColor = bubbleColor;
+          vBubbleAlpha = smoothstep(0.02, 0.24, envelope) * 0.86;
+          gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(p, 1.0);
+        }
+      `,
+      fragmentShader: `
+        varying vec3 vBubbleColor;
+        varying float vBubbleAlpha;
+        void main() {
+          if (vBubbleAlpha < 0.01) discard;
+          gl_FragColor = vec4(vBubbleColor, vBubbleAlpha);
+        }
+      `,
+    });
   }
 
   private createCrestMaterial(
@@ -963,6 +1060,13 @@ export class WaterGameEffects {
           ${grow
             ? `p.xz = effectCenter.xz + (p.xz - effectCenter.xz) * (0.72 + age * 0.72) + effectFlow * (age - 0.22) * 0.55;${followLakeSurface ? "" : " p.y += sin(age * 3.14159265) * 0.025;"}`
             : ""}
+          vec2 flowDirection = length(effectFlow) > 0.001 ? normalize(effectFlow) : vec2(0.7071, 0.7071);
+          vec2 sideDirection = vec2(-flowDirection.y, flowDirection.x);
+          float driftDistance = (age - 0.5) * mix(0.045, 0.34, visibleFlowSpeed);
+          float sideWave = sin(effectAlong * 8.0 - uTime * (0.32 + visibleFlowSpeed * 0.58) + effectPhase * 6.2831853)
+            * (0.006 + effectStrength * 0.018);
+          p.xz += flowDirection * driftDistance + sideDirection * sideWave;
+          p.y += sin(age * 3.14159265) * (0.003 + effectStrength * 0.007);
           ${followLakeSurface ? `
           float domainA = sin(dot(p.xz, normalize(vec2(-0.38, 0.92))) * 0.48 + uTime * 0.17);
           float domainB = sin(dot(p.xz, normalize(vec2(0.86, 0.51))) * 0.73 - uTime * 0.11 + 2.3);

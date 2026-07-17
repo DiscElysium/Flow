@@ -106,7 +106,17 @@ async function loadFeaturedSave(): Promise<FeaturedSave | null> {
 }
 
 const seedNames = ["NIVAL", "MORAINE", "CIRQUE", "ARÊTE", "ALPENGLOW", "TALUS"];
-const initialStats: WorldStats = { elevation: 0, peak: 0, waterVolume: 0, wateredYellowPercent: 0, fps: 60 };
+const initialStats: WorldStats = {
+  elevation: 0,
+  peak: 0,
+  waterVolume: 0,
+  wateredYellowPercent: 0,
+  fps: 60,
+  waterPhysicsMs: 0,
+  waterGeometryMs: 0,
+  waterTopologyMs: 0,
+  gpuFrameMs: null,
+};
 
 const toolOptions: Array<{
   id: TerrainTool;
@@ -148,8 +158,8 @@ export function AlpineFlowLab() {
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
   const [mode, setMode] = useState<"edit" | "play">("play");
   const [tool, setTool] = useState<TerrainTool>("orbit");
-  const [brushRadius, setBrushRadius] = useState(WORLD_CONFIG.brush.radius);
-  const [brushStrength, setBrushStrength] = useState(WORLD_CONFIG.brush.strength);
+  const [brushRadius, setBrushRadius] = useState<number>(WORLD_CONFIG.brush.radius);
+  const [brushStrength, setBrushStrength] = useState<number>(WORLD_CONFIG.brush.strength);
   const [waterActive, setWaterActive] = useState(false);
   const [flowRate, setFlowRate] = useState(1);
   const [irrigationRadius, setIrrigationRadius] = useState(3);
@@ -523,6 +533,12 @@ export function AlpineFlowLab() {
           <div><dt>CURSOR ELEVATION</dt><dd>{stats.elevation.toFixed(1)}<small> km*</small></dd></div>
           <div><dt>SURFACE WATER</dt><dd>{stats.waterVolume.toFixed(1)}<small> m³*</small></dd></div>
         </dl>
+        <div className="performance-grid" aria-label="Water performance timings">
+          <span><small>PHYSICS</small><b>{stats.waterPhysicsMs.toFixed(2)} ms</b></span>
+          <span><small>GEOMETRY</small><b>{stats.waterGeometryMs.toFixed(2)} ms</b></span>
+          <span><small>TOPOLOGY</small><b>{stats.waterTopologyMs.toFixed(2)} ms</b></span>
+          <span><small>GPU FRAME</small><b>{stats.gpuFrameMs === null ? "N/A" : `${stats.gpuFrameMs.toFixed(2)} ms`}</b></span>
+        </div>
         <div className="altitude-key" aria-label="Elevation color key">
           <span className="key-snow">SNOW LINE</span>
           <span className="key-rock">BARE ROCK</span>
