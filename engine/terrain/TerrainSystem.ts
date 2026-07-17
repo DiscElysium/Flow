@@ -337,6 +337,32 @@ export class TerrainSystem {
     );
   }
 
+  /** Sample the exact alternating triangle split used by the visible low-poly terrain. */
+  surfaceHeightAt(worldX: number, worldZ: number): number {
+    const half = WORLD_CONFIG.size * 0.5;
+    const gx = THREE.MathUtils.clamp((worldX + half) / this.cellSize, 0, WORLD_CONFIG.segments);
+    const gz = THREE.MathUtils.clamp((worldZ + half) / this.cellSize, 0, WORLD_CONFIG.segments);
+    const x0 = Math.min(WORLD_CONFIG.segments - 1, Math.floor(gx));
+    const z0 = Math.min(WORLD_CONFIG.segments - 1, Math.floor(gz));
+    const tx = gx - x0;
+    const tz = gz - z0;
+    const i00 = z0 * this.resolution + x0;
+    const h00 = this.heights[i00];
+    const h10 = this.heights[i00 + 1];
+    const h01 = this.heights[i00 + this.resolution];
+    const h11 = this.heights[i00 + this.resolution + 1];
+
+    if ((x0 + z0) % 2 === 0) {
+      return tx + tz <= 1
+        ? h00 + (h10 - h00) * tx + (h01 - h00) * tz
+        : h11 + (h01 - h11) * (1 - tx) + (h10 - h11) * (1 - tz);
+    }
+
+    return tz >= tx
+      ? h00 + (h01 - h00) * tz + (h11 - h01) * tx
+      : h00 + (h10 - h00) * tx + (h11 - h10) * tz;
+  }
+
   slopeAt(worldX: number, worldZ: number): number {
     const left = this.heightAt(worldX - this.cellSize, worldZ);
     const right = this.heightAt(worldX + this.cellSize, worldZ);

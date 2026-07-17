@@ -13,6 +13,7 @@ import { OceanSystem } from "@/engine/water/OceanSystem";
 import { WaterShowcaseScene } from "@/engine/water/WaterShowcaseScene";
 
 const IRRIGATION_UPDATE_INTERVAL = 0.4;
+const CAMERA_SURFACE_CLEARANCE = 1.2;
 
 export class AlpineWorld {
   readonly terrain: TerrainSystem;
@@ -578,6 +579,10 @@ export class AlpineWorld {
     const instantFps = 1 / deltaTime;
     this.fps = THREE.MathUtils.lerp(this.fps, instantFps, 0.06);
     this.controls.update();
+    if (!this.showcaseActive) {
+      this.ocean.update(time);
+      this.resolveCameraSurfaceCollision();
+    }
     const audioFocus = this.controls.target;
     this.ambientAudio.update(deltaTime, {
       viewDistance: this.camera.position.distanceTo(audioFocus),
@@ -589,7 +594,6 @@ export class AlpineWorld {
     }
     if (this.showcaseActive) this.waterShowcase.update(time);
     else {
-      this.ocean.update(time);
       this.skyWildlife.update(deltaTime, time);
       this.water.updateMarker(time, this.waterActive);
 
@@ -615,6 +619,26 @@ export class AlpineWorld {
     }
     this.renderer.render(this.showcaseActive ? this.waterShowcase.scene : this.scene, this.camera);
   };
+
+  private resolveCameraSurfaceCollision(): void {
+    const { x, y, z } = this.camera.position;
+    const terrainHalfSize = WORLD_CONFIG.size * 0.5;
+    let surfaceHeight = Number.NEGATIVE_INFINITY;
+
+    if (Math.abs(x) <= terrainHalfSize && Math.abs(z) <= terrainHalfSize) {
+      surfaceHeight = this.terrain.surfaceHeightAt(x, z);
+    }
+
+    const oceanHeight = this.ocean.surfaceHeightAt(x, z);
+    if (oceanHeight !== null) surfaceHeight = Math.max(surfaceHeight, oceanHeight);
+    if (!Number.isFinite(surfaceHeight)) return;
+
+    const minimumCameraY = surfaceHeight + CAMERA_SURFACE_CLEARANCE;
+    if (y < minimumCameraY) {
+      this.camera.position.y = minimumCameraY;
+      this.camera.lookAt(this.controls.target);
+    }
+  }
 
   private updateIrrigation(elapsedSeconds = IRRIGATION_UPDATE_INTERVAL): void {
     this.water.fillProximityMask(this.waterProximity, this.irrigationRadius);

@@ -1,6 +1,10 @@
 import * as THREE from "three";
 import { WORLD_CONFIG } from "@/engine/config";
 
+const OCEAN_START_X = WORLD_CONFIG.size * 0.285;
+const OCEAN_END_X = WORLD_CONFIG.size * 1.28;
+const OCEAN_DEPTH = WORLD_CONFIG.size * 1.55;
+
 /** Procedural open water that begins beyond the generated beach. */
 export class OceanSystem {
   readonly mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshStandardMaterial>;
@@ -11,13 +15,10 @@ export class OceanSystem {
   private readonly deepColor = { value: new THREE.Color("#163f5b") };
 
   constructor(private readonly scene: THREE.Scene) {
-    const startX = WORLD_CONFIG.size * 0.285;
-    const endX = WORLD_CONFIG.size * 1.28;
-    const width = endX - startX;
-    const depth = WORLD_CONFIG.size * 1.55;
-    const geometry = new THREE.PlaneGeometry(width, depth, 72, 84);
+    const width = OCEAN_END_X - OCEAN_START_X;
+    const geometry = new THREE.PlaneGeometry(width, OCEAN_DEPTH, 72, 84);
     geometry.rotateX(-Math.PI / 2);
-    geometry.translate(startX + width * 0.5, WORLD_CONFIG.seaLevel, 0);
+    geometry.translate(OCEAN_START_X + width * 0.5, WORLD_CONFIG.seaLevel, 0);
 
     const material = new THREE.MeshStandardMaterial({
       color: "#3f8794",
@@ -79,6 +80,23 @@ export class OceanSystem {
 
   update(time: number): void {
     this.timeUniform.value = time * 0.001;
+  }
+
+  /** Return the animated ocean surface under a world-space point, or null outside the sea mesh. */
+  surfaceHeightAt(worldX: number, worldZ: number): number | null {
+    if (
+      worldX < OCEAN_START_X
+      || worldX > OCEAN_END_X
+      || Math.abs(worldZ) > OCEAN_DEPTH * 0.5
+    ) {
+      return null;
+    }
+
+    const time = this.timeUniform.value;
+    const waveA = Math.sin(worldX * 0.105 + time * 0.72 + Math.sin(worldZ * 0.035));
+    const waveB = Math.sin(worldZ * 0.16 - time * 0.56 + worldX * 0.028);
+    const waveC = Math.sin((worldX + worldZ) * 0.245 + time * 0.91);
+    return WORLD_CONFIG.seaLevel + waveA * 0.12 + waveB * 0.075 + waveC * 0.035;
   }
 
   dispose(): void {

@@ -432,8 +432,26 @@ export class WaterRenderSystem {
           float waveB = sin(dot(warped, normalize(vec2(-0.27, 0.96))) * 1.78 - uWaterTime * 0.57 + 1.7);
           float waveC = sin(dot(warped, normalize(vec2(0.72, -0.69))) * 2.46 - uWaterTime * 0.83 + 3.1);
           float waveD = sin(dot(warped, normalize(vec2(-0.94, -0.34))) * 3.18 - uWaterTime * 0.39 + 0.6);
-          vLakeWaveHeight = (waveA * 0.092 + waveB * 0.058 + waveC * 0.034 + waveD * 0.018) * lakeMask;
-          transformed.y += max(-0.055, vLakeWaveHeight);
+          // Broad wave groups now have a lifecycle instead of permanently
+          // deforming the same low-poly facets. Each envelope travels slowly
+          // across the lake, rises to full strength, then fades back to flat.
+          float packetClockA = 0.5 + 0.5 * sin(
+            dot(warped, normalize(vec2(-0.52, 0.85))) * 0.095
+            - uWaterTime * 0.22
+            + domainA * 0.24
+          );
+          float packetClockB = 0.5 + 0.5 * sin(
+            dot(warped, normalize(vec2(0.81, 0.59))) * 0.083
+            + uWaterTime * 0.17
+            + domainB * 0.21
+            + 2.1
+          );
+          float packetLifeA = smoothstep(0.14, 0.82, packetClockA);
+          float packetLifeB = smoothstep(0.2, 0.88, packetClockB);
+          float calmRipple = waveC * 0.006 + waveD * 0.003;
+          float transientWaves = waveA * 0.056 * packetLifeA + waveB * 0.032 * packetLifeB;
+          vLakeWaveHeight = (calmRipple + transientWaves) * lakeMask;
+          transformed.y += vLakeWaveHeight;
           // Strong drop/convergence energy makes a few broad low-poly facets
           // lift locally. The coverage sample fades this before the shoreline,
           // so turbulence cannot bring back the old flashing water edge.
@@ -461,7 +479,7 @@ export class WaterRenderSystem {
           diffuseColor.a *= waterEdgeCoverage;
           float lakeWeight = clamp(vWaterLake, 0.0, 1.0);
           float variation = 0.5 + 0.5 * sin(vWaterWorldPosition.x * 0.37 + vWaterWorldPosition.z * 0.21 + sin(vWaterWorldPosition.z * 0.29) * 1.4);
-          float lakeLight = smoothstep(0.038, 0.125, vLakeWaveHeight) * mix(0.04, 0.13, variation) * lakeWeight;
+          float lakeLight = smoothstep(0.018, 0.075, vLakeWaveHeight) * mix(0.04, 0.13, variation) * lakeWeight;
           diffuseColor.rgb = mix(diffuseColor.rgb, min(vec3(1.0), diffuseColor.rgb + vec3(0.06, 0.11, 0.12)), lakeLight);
           vec3 waterDx = dFdx(vWaterWorldPosition);
           vec3 waterDy = dFdy(vWaterWorldPosition);
