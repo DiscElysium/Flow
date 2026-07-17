@@ -145,6 +145,27 @@ button { color: inherit; }
 
 .topbar-actions { display: flex; align-items: center; gap: 8px; }
 
+.watered-progress {
+  position: absolute;
+  z-index: 4;
+  top: 101px;
+  left: 27px;
+  margin: 0;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  font-family: var(--font-geist-sans), Arial, sans-serif;
+  font-size: clamp(54px, 5.2vw, 76px);
+  font-weight: 850;
+  line-height: .88;
+  letter-spacing: -.055em;
+  opacity: .9;
+  filter: drop-shadow(0 2px 10px rgba(32, 48, 41, .1));
+  pointer-events: none;
+  user-select: none;
+}
+
 .mode-toggle,
 .scene-mode-button {
   height: 34px;
@@ -628,6 +649,14 @@ input:disabled { cursor: not-allowed !important; opacity: .42; }
 .tutorial-panel h2 { margin-bottom: 8px; }
 .tutorial-intro { margin: 0 0 24px; color: #66736e; font-size: 12px; line-height: 1.6; }
 .tutorial-panel li { grid-template-columns: 126px 1fr; }
+.tutorial-panel .tutorial-goal {
+  margin-bottom: 5px;
+  padding: 14px 12px;
+  border-top: 0;
+  border-radius: 5px;
+  background: rgba(94, 133, 109, .09);
+}
+.tutorial-goal b { color: #527663; }
 .tutorial-panel kbd {
   display: inline-block;
   margin: 0 2px;
@@ -720,6 +749,7 @@ input:disabled { cursor: not-allowed !important; opacity: .42; }
   .lab-shell { min-height: 540px; }
   .topbar { top: 10px; left: 10px; right: 10px; height: 56px; padding-left: 12px; }
   .brand small, .seed-chip { display: none; }
+  .watered-progress { top: 83px; left: 14px; font-size: clamp(44px, 14vw, 60px); }
   .scene-mode-button { width: 34px; padding: 0; justify-content: center; }
   .scene-mode-button span { display: none; }
   .scene-intro { top: 15%; left: 22px; width: calc(100% - 44px); }

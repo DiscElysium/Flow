@@ -135,9 +135,9 @@ export function AlpineFlowLab() {
   const [seed, setSeed] = useState("NIVAL-042");
   const [ready, setReady] = useState(false);
   const [renderError, setRenderError] = useState(false);
-  const [showTutorial, setShowTutorial] = useState(false);
+  const [showTutorial, setShowTutorial] = useState(true);
   const [showSaves, setShowSaves] = useState(false);
-  const [mode, setMode] = useState<"edit" | "play">("edit");
+  const [mode, setMode] = useState<"edit" | "play">("play");
   const [tool, setTool] = useState<TerrainTool>("orbit");
   const [brushRadius, setBrushRadius] = useState(3.2);
   const [brushStrength, setBrushStrength] = useState(5.4);
@@ -156,6 +156,7 @@ export function AlpineFlowLab() {
   const [saveMessage, setSaveMessage] = useState<{ text: string; type: "ok" | "error" } | null>(null);
   const editMode = mode === "edit";
   const displayedSaves = featuredSave ? [featuredSave.meta, ...saves] : saves;
+  const wateredProgress = Math.max(0, Math.min(100, stats.wateredYellowPercent));
   const toggleMode = useCallback(() => {
     if (editMode) setTool("orbit");
     setMode(editMode ? "play" : "edit");
@@ -362,6 +363,22 @@ export function AlpineFlowLab() {
       {renderError && <FallbackMountain />}
       <div className="atmosphere-grain" aria-hidden="true" />
 
+      {!showcaseActive && (
+        <div
+          className="watered-progress"
+          role="progressbar"
+          aria-label="Dry ground restored by water"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Number(wateredProgress.toFixed(1))}
+          style={{
+            backgroundImage: `linear-gradient(90deg, rgba(65, 132, 99, .94) 0%, rgba(65, 132, 99, .94) ${wateredProgress}%, rgba(255, 255, 255, .34) ${wateredProgress}%, rgba(255, 255, 255, .34) 100%)`,
+          }}
+        >
+          {wateredProgress.toFixed(1)}%
+        </div>
+      )}
+
       {placingWaterSource && (
         <div className="source-placement-tip" role="status">
           <MapPin size={14} /> Move the pointer to position the source, then click the ground to place it
@@ -420,7 +437,6 @@ export function AlpineFlowLab() {
           <div><dt>PEAK HEIGHT</dt><dd>{stats.peak.toFixed(1)}<small> km*</small></dd></div>
           <div><dt>CURSOR ELEVATION</dt><dd>{stats.elevation.toFixed(1)}<small> km*</small></dd></div>
           <div><dt>SURFACE WATER</dt><dd>{stats.waterVolume.toFixed(1)}<small> m³*</small></dd></div>
-          <div><dt>WATERED YELLOW GROUND</dt><dd>{stats.wateredYellowPercent.toFixed(1)}<small> %</small></dd></div>
         </dl>
         <div className="altitude-key" aria-label="Elevation color key">
           <span className="key-snow">SNOW LINE</span>
@@ -574,6 +590,7 @@ export function AlpineFlowLab() {
             <h2 id="tutorial-title">Follow the water</h2>
             <p className="tutorial-intro">The essential controls for exploring the mountain in Play Mode.</p>
             <ol>
+              <li className="tutorial-goal"><b>YOUR GOAL</b><span>Guide meltwater across the dry yellow ground and turn as much of it green as possible. The percentage in the upper-left tracks your progress.</span></li>
               <li><b>ROTATE VIEW</b><span><kbd>MIDDLE MOUSE</kbd> + drag to orbit around the mountain.</span></li>
               <li><b>MOVE VIEW</b><span>Hold <kbd>SHIFT</kbd> + <kbd>MIDDLE MOUSE</kbd>, then drag to move the view sideways or vertically.</span></li>
               <li><b>ZOOM</b><span>Use the <kbd>MOUSE WHEEL</kbd> to move closer to or farther from the landscape.</span></li>
