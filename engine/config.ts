@@ -26,6 +26,8 @@ export const WORLD_CONFIG = {
   },
   water: {
     sourceRate: 0.8,
+    minFlowRate: 0.2,
+    maxFlowRate: 100,
     flow: 0.14,
     substeps: 3,
     evaporation: 0.00001,

@@ -559,7 +559,15 @@ export function AlpineFlowLab() {
           </div>
           <label>
             <span>FLOW RATE <b>{flowRate.toFixed(1)}×</b></span>
-            <input type="range" min="0.2" max="10" step="0.1" value={flowRate} onChange={(event) => setFlowRate(Number(event.target.value))} disabled={renderError} />
+            <input
+              type="range"
+              min={WORLD_CONFIG.water.minFlowRate}
+              max={WORLD_CONFIG.water.maxFlowRate}
+              step="0.1"
+              value={flowRate}
+              onChange={(event) => setFlowRate(Number(event.target.value))}
+              disabled={renderError}
+            />
           </label>
           {editMode && (
             <label>

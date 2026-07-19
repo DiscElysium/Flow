@@ -1,9 +1,27 @@
 import * as THREE from "three";
 import { WORLD_CONFIG } from "@/engine/config";
 
-const OCEAN_START_X = WORLD_CONFIG.sizeX * 0.41;
-const OCEAN_END_X = OCEAN_START_X + WORLD_CONFIG.sizeX * 0.4975;
-const OCEAN_DEPTH = WORLD_CONFIG.sizeX * 1.08;
+export const OCEAN_START_X = WORLD_CONFIG.sizeX * 0.41;
+export const OCEAN_END_X = OCEAN_START_X + WORLD_CONFIG.sizeX * 0.4975;
+export const OCEAN_DEPTH = WORLD_CONFIG.sizeX * 1.08;
+const OCEAN_WAVE_A_AMPLITUDE = 0.12;
+const OCEAN_WAVE_B_AMPLITUDE = 0.075;
+const OCEAN_WAVE_C_AMPLITUDE = 0.035;
+const OCEAN_MAX_WAVE_HEIGHT = OCEAN_WAVE_A_AMPLITUDE
+  + OCEAN_WAVE_B_AMPLITUDE
+  + OCEAN_WAVE_C_AMPLITUDE;
+
+/** Only the visible front sea can absorb simulated terrain water. */
+export function isOceanOutflowPosition(
+  worldX: number,
+  worldZ: number,
+  terrainHeight: number,
+): boolean {
+  return worldX >= OCEAN_START_X
+    && worldX <= OCEAN_END_X
+    && Math.abs(worldZ) <= OCEAN_DEPTH * 0.5
+    && terrainHeight <= WORLD_CONFIG.seaLevel + OCEAN_MAX_WAVE_HEIGHT;
+}
 
 /** Procedural open water that begins beyond the generated beach. */
 export class OceanSystem {
@@ -52,7 +70,9 @@ export class OceanSystem {
           float oceanWaveA = sin(position.x * 0.105 + uOceanTime * 0.72 + sin(position.z * 0.035));
           float oceanWaveB = sin(position.z * 0.16 - uOceanTime * 0.56 + position.x * 0.028);
           float oceanWaveC = sin((position.x + position.z) * 0.245 + uOceanTime * 0.91);
-          transformed.y += oceanWaveA * 0.12 + oceanWaveB * 0.075 + oceanWaveC * 0.035;`,
+          transformed.y += oceanWaveA * ${OCEAN_WAVE_A_AMPLITUDE}
+            + oceanWaveB * ${OCEAN_WAVE_B_AMPLITUDE}
+            + oceanWaveC * ${OCEAN_WAVE_C_AMPLITUDE};`,
         );
       shader.fragmentShader = shader.fragmentShader
         .replace(
@@ -101,7 +121,10 @@ export class OceanSystem {
     const waveA = Math.sin(worldX * 0.105 + time * 0.72 + Math.sin(worldZ * 0.035));
     const waveB = Math.sin(worldZ * 0.16 - time * 0.56 + worldX * 0.028);
     const waveC = Math.sin((worldX + worldZ) * 0.245 + time * 0.91);
-    return WORLD_CONFIG.seaLevel + waveA * 0.12 + waveB * 0.075 + waveC * 0.035;
+    return WORLD_CONFIG.seaLevel
+      + waveA * OCEAN_WAVE_A_AMPLITUDE
+      + waveB * OCEAN_WAVE_B_AMPLITUDE
+      + waveC * OCEAN_WAVE_C_AMPLITUDE;
   }
 
   dispose(): void {

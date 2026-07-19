@@ -74,6 +74,8 @@ const MAX_FOAM_ANCHORS = 64;
 const WATERFALL_MIN_TOTAL_DROP = 3.6;
 const WATERFALL_MIN_AVERAGE_SLOPE = 1.15;
 const WATERFALL_SEARCH_CELLS = 6;
+const LAKE_EFFECT_BLEND_START = 0.52;
+const LAKE_EFFECT_BLEND_END = 0.78;
 
 /** Converts stable simulation fields into the approved low-poly water effects. */
 export class WaterGameEffects {
@@ -93,7 +95,6 @@ export class WaterGameEffects {
   private readonly bubbleFlow = new THREE.InstancedBufferAttribute(new Float32Array(MAX_BUBBLES * 2), 2);
   private readonly bubbleMotion = new THREE.InstancedBufferAttribute(new Float32Array(MAX_BUBBLES * 4), 4);
   private readonly bubbleShape = new THREE.InstancedBufferAttribute(new Float32Array(MAX_BUBBLES * 4), 4);
-  private readonly bubbleColor = new THREE.InstancedBufferAttribute(new Float32Array(MAX_BUBBLES * 3), 3);
   private readonly bubbleMaterial = this.createBubbleMaterial();
   private readonly bubbles = new THREE.InstancedMesh(this.bubbleGeometry, this.bubbleMaterial, MAX_BUBBLES);
   private readonly impacts: Impact[] = [];
@@ -102,7 +103,6 @@ export class WaterGameEffects {
   private readonly foamAnchors = new Map<number, FoamAnchor>();
   private readonly lakeAnchors = new Set<number>();
   private readonly matrix = new THREE.Matrix4();
-  private readonly color = new THREE.Color();
 
   constructor(private readonly scene: THREE.Scene, private readonly terrain: TerrainSystem) {
     this.group.name = "dynamic-water-effects";
@@ -123,7 +123,6 @@ export class WaterGameEffects {
       ["bubbleFlow", this.bubbleFlow],
       ["bubbleMotion", this.bubbleMotion],
       ["bubbleShape", this.bubbleShape],
-      ["bubbleColor", this.bubbleColor],
     ] as const) {
       attribute.setUsage(THREE.DynamicDrawUsage);
       this.bubbleGeometry.setAttribute(name, attribute);
@@ -188,14 +187,14 @@ export class WaterGameEffects {
     for (const [index, anchor] of this.riverAnchors) {
       const directionLength = Math.hypot(fields.flowX[index], fields.flowZ[index]);
       const fullyDry = fields.coverage[index] < 5 || fields.depth[index] < 0.00004;
-      if (fullyDry) {
+      const riverWeight = this.getRiverEffectWeight(fields.lakeFactor[index]);
+      if (fullyDry || riverWeight <= 0.001) {
         this.riverAnchors.delete(index);
         continue;
       }
 
       const stable = fields.coverage[index] >= 95
         && fields.flowSpeed[index] >= 0.04
-        && fields.lakeFactor[index] <= 0.72
         && directionLength >= 0.04;
       if (!stable) {
         anchor.unstableFrames += 1;
@@ -223,7 +222,8 @@ export class WaterGameEffects {
         const index = z * resolution + x;
         if (this.riverAnchors.has(index)) continue;
         const speed = fields.flowSpeed[index];
-        if (fields.coverage[index] < 150 || speed < 0.1 || fields.lakeFactor[index] > 0.58) continue;
+        const riverWeight = this.getRiverEffectWeight(fields.lakeFactor[index]);
+        if (fields.coverage[index] < 150 || speed < 0.1 || riverWeight <= 0.01) continue;
         const chance = 0.038 + speed * 0.085;
         if (this.hash(x, z, 3) > chance) continue;
         const directionLength = Math.hypot(fields.flowX[index], fields.flowZ[index]);
@@ -271,6 +271,7 @@ export class WaterGameEffects {
       center.z += side.y * anchor.lateralOffset;
       const length = THREE.MathUtils.lerp(0.52, 1.08, anchor.speed) * THREE.MathUtils.lerp(0.86, 1.1, this.hash(x, z, 7));
       const width = THREE.MathUtils.lerp(0.025, 0.07, this.hash(x, z, 11));
+      const riverWeight = this.getRiverEffectWeight(fields.lakeFactor[index]);
       this.appendCurveRibbon(
         buffers,
         center,
@@ -281,7 +282,7 @@ export class WaterGameEffects {
         fields,
         8,
         anchor.speed,
-        1,
+        riverWeight,
       );
       count += 1;
     }
@@ -294,7 +295,11 @@ export class WaterGameEffects {
     // Keep the same deterministic anchor while a turbulent patch fluctuates.
     // Only its direction/strength ease toward the latest simulation field.
     for (const [index, anchor] of this.turbulenceAnchors) {
-      if (fields.coverage[index] < 5 || fields.depth[index] < 0.000005) {
+      if (
+        fields.coverage[index] < 5
+        || fields.depth[index] < 0.000005
+        || this.getRiverEffectWeight(fields.lakeFactor[index]) <= 0.001
+      ) {
         this.turbulenceAnchors.delete(index);
         continue;
       }
@@ -337,7 +342,7 @@ export class WaterGameEffects {
         if (rawStrength < 0.18
           || fields.coverage[index] < 150
           || fields.depth[index] < 0.00004
-          || fields.lakeFactor[index] > 0.78
+          || this.getRiverEffectWeight(fields.lakeFactor[index]) <= 0.01
           || this.countWetNeighbours(index, fields, 105) < 2) continue;
         const strength = THREE.MathUtils.smoothstep(rawStrength, 0.1, 0.82);
         if (this.hash(x, z, 89) > 0.02 + strength * 0.065) continue;
@@ -376,6 +381,7 @@ export class WaterGameEffects {
         * THREE.MathUtils.lerp(0.84, 1.14, this.hash(x, z, 101));
       const width = THREE.MathUtils.lerp(0.016, 0.038, this.hash(x, z, 103))
         * THREE.MathUtils.lerp(0.78, 1, anchor.strength);
+      const riverWeight = this.getRiverEffectWeight(fields.lakeFactor[index]);
       this.appendCurveRibbon(
         buffers,
         center,
@@ -386,7 +392,7 @@ export class WaterGameEffects {
         fields,
         5,
         anchor.speed,
-        anchor.strength,
+        anchor.strength * riverWeight,
         0.034,
       );
       count += 1;
@@ -459,8 +465,12 @@ export class WaterGameEffects {
     const resolution = this.terrain.resolution;
     const resolutionZ = this.terrain.resolutionZ;
     for (const index of this.lakeAnchors) {
-      // 锚点只有在水真正退去时才移除，避免湖泊判定的小幅波动让整条浪线闪现。
-      if (fields.coverage[index] < 70 || fields.depth[index] < 0.018 || fields.lakeFactor[index] < 0.03) {
+      const lakeWeight = this.getLakeEffectWeight(fields.lakeFactor[index]);
+      if (
+        fields.coverage[index] < 70
+        || fields.depth[index] < 0.018
+        || lakeWeight <= 0.001
+      ) {
         this.lakeAnchors.delete(index);
       }
     }
@@ -469,8 +479,9 @@ export class WaterGameEffects {
       for (let x = 2; x < resolution - 2 && this.lakeAnchors.size < MAX_LAKE_CRESTS; x += 1) {
         const index = z * resolution + x;
         const lake = fields.lakeFactor[index];
+        const lakeWeight = this.getLakeEffectWeight(lake);
         if (this.lakeAnchors.has(index)) continue;
-        if (fields.coverage[index] < 175 || fields.depth[index] < 0.08 || lake < 0.36) continue;
+        if (fields.coverage[index] < 175 || fields.depth[index] < 0.08 || lakeWeight <= 0.01) continue;
         if (this.hash(x, z, 23) > 0.032 + lake * 0.035) continue;
         this.lakeAnchors.add(index);
       }
@@ -488,7 +499,7 @@ export class WaterGameEffects {
         const arc = THREE.MathUtils.lerp(1.08, 1.55, this.hash(x, z, 37));
         const rotation = Math.PI * (0.86 + this.hash(x, z, 41) * 0.24);
         const direction = new THREE.Vector2(Math.cos(rotation), Math.sin(rotation));
-        const surfaceStrength = THREE.MathUtils.smoothstep(lake, 0.24, 0.72);
+        const surfaceStrength = this.getLakeEffectWeight(lake);
         this.appendArcRibbon(
           buffers,
           center,
@@ -866,7 +877,6 @@ export class WaterGameEffects {
       scaleY: number,
       spreadBase: number,
       spreadGrowth: number,
-      color: THREE.ColorRepresentation,
     ): void => {
       this.matrix.makeTranslation(center.x, center.y, center.z);
       this.bubbles.setMatrixAt(cursor, this.matrix);
@@ -875,8 +885,6 @@ export class WaterGameEffects {
       this.bubbleFlow.setXY(cursor, flowX, flowZ);
       this.bubbleMotion.setXYZW(cursor, riseLinear, riseArc, flowDrift, sideways);
       this.bubbleShape.setXYZW(cursor, scaleXZ, scaleY, spreadBase, spreadGrowth);
-      this.color.set(color);
-      this.bubbleColor.setXYZ(cursor, this.color.r, this.color.g, this.color.b);
       cursor += 1;
     };
 
@@ -906,7 +914,6 @@ export class WaterGameEffects {
           size * 0.78,
           0.6,
           0.5,
-          i % 3 === 0 ? "#cce8e3" : i % 3 === 1 ? "#edf7f3" : "#dcefeb",
         );
       }
     }
@@ -926,7 +933,6 @@ export class WaterGameEffects {
         const distance = Math.sqrt(this.hash(index, i, 131)) * radius;
         const size = THREE.MathUtils.lerp(0.045, 0.13, this.hash(index, i, 139))
           * THREE.MathUtils.lerp(0.72, 1, foam.strength);
-        const shade = (index + i) % 3;
         writeBubble(
           foam.center,
           phase,
@@ -943,7 +949,6 @@ export class WaterGameEffects {
           size * 0.82,
           0.58,
           0.34,
-          shade === 0 ? "#cce8e3" : shade === 1 ? "#edf7f3" : "#dcefeb",
         );
       }
     }
@@ -956,7 +961,6 @@ export class WaterGameEffects {
       this.bubbleFlow,
       this.bubbleMotion,
       this.bubbleShape,
-      this.bubbleColor,
     ]) attribute.needsUpdate = true;
   }
 
@@ -974,7 +978,6 @@ export class WaterGameEffects {
         attribute vec2 bubbleFlow;
         attribute vec4 bubbleMotion;
         attribute vec4 bubbleShape;
-        attribute vec3 bubbleColor;
         varying vec3 vBubbleColor;
         varying float vBubbleAlpha;
         void main() {
@@ -998,7 +1001,11 @@ export class WaterGameEffects {
           p.xz += travel;
           p.y += age * bubbleMotion.x + lifeWave * bubbleMotion.y;
 
-          vBubbleColor = bubbleColor;
+          float shade = floor(fract(bubbleLife.x * 17.0) * 3.0);
+          vec3 coolFoam = vec3(0.604, 0.807, 0.769);
+          vec3 brightFoam = vec3(0.847, 0.930, 0.894);
+          vec3 softFoam = vec3(0.716, 0.863, 0.820);
+          vBubbleColor = shade < 1.0 ? coolFoam : shade < 2.0 ? brightFoam : softFoam;
           vBubbleAlpha = smoothstep(0.02, 0.24, envelope) * 0.86;
           gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(p, 1.0);
         }
@@ -1351,6 +1358,18 @@ export class WaterGameEffects {
       if (Math.max(Math.abs(anchorX - x), Math.abs(anchorZ - z)) <= cellRadius) return true;
     }
     return false;
+  }
+
+  private getLakeEffectWeight(lakeFactor: number): number {
+    return THREE.MathUtils.smoothstep(
+      lakeFactor,
+      LAKE_EFFECT_BLEND_START,
+      LAKE_EFFECT_BLEND_END,
+    );
+  }
+
+  private getRiverEffectWeight(lakeFactor: number): number {
+    return 1 - this.getLakeEffectWeight(lakeFactor);
   }
 
   private hash(x: number, z: number, salt: number): number {

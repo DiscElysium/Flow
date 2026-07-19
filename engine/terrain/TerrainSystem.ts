@@ -7,6 +7,8 @@ import type { MountainData, TerrainTool } from "@/engine/types";
 type Point = [number, number, number];
 type Point2 = { x: number; z: number };
 type RockComponent = { group: number; indices: number[] };
+type TerrainPoint = { position: Point; index: number };
+const TERRAIN_VALUES_PER_CELL = 18;
 const scaledWorldHeight = (baseHeight: number): number => WORLD_CONFIG.seaLevel
   + (baseHeight - WORLD_CONFIG.seaLevel) * WORLD_CONFIG.verticalScale;
 
@@ -287,15 +289,15 @@ export class TerrainSystem {
     strength: number,
     deltaTime: number,
     protectRock = false,
-  ): boolean {
-    if (tool === "orbit") return false;
+  ): number[] {
+    if (tool === "orbit") return [];
     const center = this.worldToGrid(worldX, worldZ);
     const gridRadius = Math.ceil(radius / this.cellSize);
     if (tool === "paint-green" || tool === "paint-yellow" || tool === "paint-rock") {
       return this.applySurfacePaint(center, gridRadius, worldX, worldZ, radius, tool);
     }
-    const before = tool === "smooth" ? this.heights.slice() : this.heights;
-    let changed = false;
+    const changedIndices: number[] = [];
+    const nextHeights: number[] = [];
 
     for (let z = Math.max(1, center.z - gridRadius); z <= Math.min(this.resolutionZ - 2, center.z + gridRadius); z += 1) {
       for (let x = Math.max(1, center.x - gridRadius); x <= Math.min(this.resolutionX - 2, center.x + gridRadius); x += 1) {
@@ -313,11 +315,11 @@ export class TerrainSystem {
 
         if (tool === "smooth") {
           const average = (
-            before[index] +
-            before[index - 1] +
-            before[index + 1] +
-            before[index - this.resolution] +
-            before[index + this.resolution]
+            this.heights[index] +
+            this.heights[index - 1] +
+            this.heights[index + 1] +
+            this.heights[index - this.resolution] +
+            this.heights[index + this.resolution]
           ) / 5;
           next = THREE.MathUtils.lerp(current, average, Math.min(1, deltaTime * strength * 0.55 * falloff));
         } else {
@@ -327,18 +329,20 @@ export class TerrainSystem {
 
         next = THREE.MathUtils.clamp(next, WORLD_CONFIG.minHeight, WORLD_CONFIG.maxHeight);
         if (Math.abs(next - current) > 0.00001) {
-          this.heights[index] = next;
-          changed = true;
+          changedIndices.push(index);
+          nextHeights.push(next);
         }
       }
     }
 
-    if (changed) {
-      this.recalculateRange();
-      this.rebuildGeometry();
+    if (changedIndices.length > 0) {
+      for (let offset = 0; offset < changedIndices.length; offset += 1) {
+        this.heights[changedIndices[offset]] = nextHeights[offset];
+      }
+      this.updateGeometryForVertices(changedIndices);
       this.rockBodiesDirty = true;
     }
-    return changed;
+    return changedIndices;
   }
 
   heightAt(worldX: number, worldZ: number): number {
@@ -443,85 +447,197 @@ export class TerrainSystem {
   }
 
   private rebuildGeometry(): void {
-    const verticesPerCell = 6;
-    const positions = new Float32Array(WORLD_CONFIG.segmentsX * WORLD_CONFIG.segmentsZ * verticesPerCell * 3);
+    const positions = new Float32Array(WORLD_CONFIG.segmentsX * WORLD_CONFIG.segmentsZ * TERRAIN_VALUES_PER_CELL);
     const colors = new Float32Array(positions.length);
     const dryColors = new Float32Array(positions.length);
     const wateredColors = new Float32Array(positions.length);
-    const halfX = WORLD_CONFIG.sizeX * 0.5;
-    const halfZ = WORLD_CONFIG.sizeZ * 0.5;
-    let cursor = 0;
     this.greenableCells.fill(0);
-    type TerrainPoint = { position: Point; index: number };
-
-    const point = (x: number, z: number): TerrainPoint => {
-      const index = z * this.resolution + x;
-      return {
-        position: [x * this.cellSize - halfX, this.heights[index], z * this.cellSize - halfZ],
-        index,
-      };
-    };
 
     for (let z = 0; z < WORLD_CONFIG.segmentsZ; z += 1) {
       for (let x = 0; x < WORLD_CONFIG.segmentsX; x += 1) {
-        const p00 = point(x, z);
-        const p10 = point(x + 1, z);
-        const p01 = point(x, z + 1);
-        const p11 = point(x + 1, z + 1);
-        const triangles: [TerrainPoint, TerrainPoint, TerrainPoint][] = (x + z) % 2 === 0
-          ? [[p00, p01, p10], [p10, p01, p11]]
-          : [[p00, p01, p11], [p00, p11, p10]];
-
-        triangles.forEach((triangle, triangleIndex) => {
-          const trianglePoints: [Point, Point, Point] = [
-            triangle[0].position,
-            triangle[1].position,
-            triangle[2].position,
-          ];
-          const faceColors = this.faceColors(trianglePoints, x, z, triangleIndex);
-          if (!faceColors.dry.equals(faceColors.watered)) {
-            this.greenableCells[z * WORLD_CONFIG.segmentsX + x] = 1;
-          }
-          const color = this.cellIsGreen(x, z) ? faceColors.watered : faceColors.dry;
-          for (const vertex of triangle) {
-            const rockSurface = this.rockSurfaceHeights[vertex.index];
-            const terrainSink = this.rockVisualSink[vertex.index];
-            // The terrain below a boulder is only a hidden support surface. Clamp
-            // it beneath the exact faceted stone height so it can never pierce the
-            // stone after neighboring ground is carved or raised.
-            const displayHeight = Number.isFinite(rockSurface)
-              ? Math.min(vertex.position[1], rockSurface - 0.025 - terrainSink)
-              : vertex.position[1];
-            positions[cursor] = vertex.position[0];
-            colors[cursor] = color.r;
-            dryColors[cursor] = faceColors.dry.r;
-            wateredColors[cursor] = faceColors.watered.r;
-            cursor += 1;
-            positions[cursor] = displayHeight;
-            colors[cursor] = color.g;
-            dryColors[cursor] = faceColors.dry.g;
-            wateredColors[cursor] = faceColors.watered.g;
-            cursor += 1;
-            positions[cursor] = vertex.position[2];
-            colors[cursor] = color.b;
-            dryColors[cursor] = faceColors.dry.b;
-            wateredColors[cursor] = faceColors.watered.b;
-            cursor += 1;
-          }
-        });
+        this.writeTerrainCell(x, z, positions, colors, dryColors, wateredColors);
       }
     }
 
     const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-    geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3).setUsage(THREE.DynamicDrawUsage));
+    geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3).setUsage(THREE.DynamicDrawUsage));
     geometry.computeVertexNormals();
-    geometry.computeBoundingBox();
-    geometry.computeBoundingSphere();
+    geometry.getAttribute("normal").setUsage(THREE.DynamicDrawUsage);
+    this.setConservativeTerrainBounds(geometry);
     this.mesh.geometry.dispose();
     this.mesh.geometry = geometry;
     this.dryColors = dryColors;
     this.wateredColors = wateredColors;
+  }
+
+  /** Rewrite only the cells touching vertices changed by the current brush sample. */
+  private updateGeometryForVertices(changedIndices: readonly number[]): void {
+    const dirtyCells = this.collectDirtyCells(changedIndices);
+    if (dirtyCells.length === 0) return;
+    const geometry = this.mesh.geometry;
+    const position = geometry.getAttribute("position") as THREE.BufferAttribute | undefined;
+    const color = geometry.getAttribute("color") as THREE.BufferAttribute | undefined;
+    const normal = geometry.getAttribute("normal") as THREE.BufferAttribute | undefined;
+    if (!position || !color || !normal) return;
+    const positions = position.array as Float32Array;
+    const colors = color.array as Float32Array;
+    const normals = normal.array as Float32Array;
+
+    for (const cellIndex of dirtyCells) {
+      const x = cellIndex % WORLD_CONFIG.segmentsX;
+      const z = Math.floor(cellIndex / WORLD_CONFIG.segmentsX);
+      this.writeTerrainCell(x, z, positions, colors, this.dryColors, this.wateredColors);
+      this.writeTerrainCellNormals(cellIndex, positions, normals);
+    }
+
+    this.markTerrainCellUpdates(position, dirtyCells);
+    this.markTerrainCellUpdates(color, dirtyCells);
+    this.markTerrainCellUpdates(normal, dirtyCells);
+  }
+
+  private writeTerrainCell(
+    x: number,
+    z: number,
+    positions: Float32Array,
+    colors: Float32Array,
+    dryColors: Float32Array,
+    wateredColors: Float32Array,
+  ): void {
+    const halfX = WORLD_CONFIG.sizeX * 0.5;
+    const halfZ = WORLD_CONFIG.sizeZ * 0.5;
+    const point = (pointX: number, pointZ: number): TerrainPoint => {
+      const index = pointZ * this.resolution + pointX;
+      return {
+        position: [
+          pointX * this.cellSize - halfX,
+          this.heights[index],
+          pointZ * this.cellSize - halfZ,
+        ],
+        index,
+      };
+    };
+    const p00 = point(x, z);
+    const p10 = point(x + 1, z);
+    const p01 = point(x, z + 1);
+    const p11 = point(x + 1, z + 1);
+    const triangles: [TerrainPoint, TerrainPoint, TerrainPoint][] = (x + z) % 2 === 0
+      ? [[p00, p01, p10], [p10, p01, p11]]
+      : [[p00, p01, p11], [p00, p11, p10]];
+    const cellIndex = z * WORLD_CONFIG.segmentsX + x;
+    let cursor = cellIndex * TERRAIN_VALUES_PER_CELL;
+    this.greenableCells[cellIndex] = 0;
+
+    triangles.forEach((triangle, triangleIndex) => {
+      const trianglePoints: [Point, Point, Point] = [
+        triangle[0].position,
+        triangle[1].position,
+        triangle[2].position,
+      ];
+      const faceColors = this.faceColors(trianglePoints, x, z, triangleIndex);
+      if (!faceColors.dry.equals(faceColors.watered)) this.greenableCells[cellIndex] = 1;
+      const currentColor = this.cellIsGreen(x, z) ? faceColors.watered : faceColors.dry;
+      for (const vertex of triangle) {
+        const rockSurface = this.rockSurfaceHeights[vertex.index];
+        const terrainSink = this.rockVisualSink[vertex.index];
+        const displayHeight = Number.isFinite(rockSurface)
+          ? Math.min(vertex.position[1], rockSurface - 0.025 - terrainSink)
+          : vertex.position[1];
+        positions[cursor] = vertex.position[0];
+        colors[cursor] = currentColor.r;
+        dryColors[cursor] = faceColors.dry.r;
+        wateredColors[cursor] = faceColors.watered.r;
+        cursor += 1;
+        positions[cursor] = displayHeight;
+        colors[cursor] = currentColor.g;
+        dryColors[cursor] = faceColors.dry.g;
+        wateredColors[cursor] = faceColors.watered.g;
+        cursor += 1;
+        positions[cursor] = vertex.position[2];
+        colors[cursor] = currentColor.b;
+        dryColors[cursor] = faceColors.dry.b;
+        wateredColors[cursor] = faceColors.watered.b;
+        cursor += 1;
+      }
+    });
+  }
+
+  private writeTerrainCellNormals(cellIndex: number, positions: Float32Array, normals: Float32Array): void {
+    const cellOffset = cellIndex * TERRAIN_VALUES_PER_CELL;
+    for (let triangle = 0; triangle < 2; triangle += 1) {
+      const offset = cellOffset + triangle * 9;
+      const abX = positions[offset + 3] - positions[offset];
+      const abY = positions[offset + 4] - positions[offset + 1];
+      const abZ = positions[offset + 5] - positions[offset + 2];
+      const acX = positions[offset + 6] - positions[offset];
+      const acY = positions[offset + 7] - positions[offset + 1];
+      const acZ = positions[offset + 8] - positions[offset + 2];
+      let normalX = abY * acZ - abZ * acY;
+      let normalY = abZ * acX - abX * acZ;
+      let normalZ = abX * acY - abY * acX;
+      const length = Math.hypot(normalX, normalY, normalZ) || 1;
+      normalX /= length;
+      normalY /= length;
+      normalZ /= length;
+      for (let vertex = 0; vertex < 3; vertex += 1) {
+        const normalOffset = offset + vertex * 3;
+        normals[normalOffset] = normalX;
+        normals[normalOffset + 1] = normalY;
+        normals[normalOffset + 2] = normalZ;
+      }
+    }
+  }
+
+  private collectDirtyCells(changedIndices: readonly number[]): number[] {
+    const dirtyCells = new Set<number>();
+    for (const index of changedIndices) {
+      const vertexX = index % this.resolution;
+      const vertexZ = Math.floor(index / this.resolution);
+      for (let cellZ = vertexZ - 1; cellZ <= vertexZ; cellZ += 1) {
+        if (cellZ < 0 || cellZ >= WORLD_CONFIG.segmentsZ) continue;
+        for (let cellX = vertexX - 1; cellX <= vertexX; cellX += 1) {
+          if (cellX < 0 || cellX >= WORLD_CONFIG.segmentsX) continue;
+          dirtyCells.add(cellZ * WORLD_CONFIG.segmentsX + cellX);
+        }
+      }
+    }
+    return Array.from(dirtyCells).sort((a, b) => a - b);
+  }
+
+  private markTerrainCellUpdates(attribute: THREE.BufferAttribute, dirtyCells: readonly number[]): void {
+    attribute.clearUpdateRanges();
+    let rangeStart = dirtyCells[0];
+    let previous = rangeStart;
+    for (let offset = 1; offset <= dirtyCells.length; offset += 1) {
+      const cell = dirtyCells[offset];
+      if (cell === previous + 1) {
+        previous = cell;
+        continue;
+      }
+      attribute.addUpdateRange(
+        rangeStart * TERRAIN_VALUES_PER_CELL,
+        (previous - rangeStart + 1) * TERRAIN_VALUES_PER_CELL,
+      );
+      rangeStart = cell;
+      previous = cell;
+    }
+    attribute.needsUpdate = true;
+  }
+
+  private setConservativeTerrainBounds(geometry: THREE.BufferGeometry): void {
+    const halfX = WORLD_CONFIG.sizeX * 0.5;
+    const halfZ = WORLD_CONFIG.sizeZ * 0.5;
+    const minimumY = WORLD_CONFIG.minHeight - 1;
+    const maximumY = WORLD_CONFIG.maxHeight + 1;
+    const centerY = (minimumY + maximumY) * 0.5;
+    geometry.boundingBox = new THREE.Box3(
+      new THREE.Vector3(-halfX, minimumY, -halfZ),
+      new THREE.Vector3(halfX, maximumY, halfZ),
+    );
+    geometry.boundingSphere = new THREE.Sphere(
+      new THREE.Vector3(0, centerY, 0),
+      Math.hypot(halfX, halfZ, (maximumY - minimumY) * 0.5),
+    );
   }
 
   private createTerrainMaterial(): THREE.MeshStandardMaterial {
@@ -1157,7 +1273,24 @@ export class TerrainSystem {
         cursor += valuesPerCell;
       }
     }
+    attribute.clearUpdateRanges();
     attribute.needsUpdate = true;
+  }
+
+  private refreshTerrainColorsForVertices(changedIndices: readonly number[]): void {
+    const dirtyCells = this.collectDirtyCells(changedIndices);
+    if (dirtyCells.length === 0) return;
+    const attribute = this.mesh.geometry.getAttribute("color") as THREE.BufferAttribute | undefined;
+    if (!attribute || this.dryColors.length !== attribute.array.length) return;
+    const colors = attribute.array as Float32Array;
+    for (const cellIndex of dirtyCells) {
+      const x = cellIndex % WORLD_CONFIG.segmentsX;
+      const z = Math.floor(cellIndex / WORLD_CONFIG.segmentsX);
+      const source = this.cellIsGreen(x, z) ? this.wateredColors : this.dryColors;
+      const start = cellIndex * TERRAIN_VALUES_PER_CELL;
+      colors.set(source.subarray(start, start + TERRAIN_VALUES_PER_CELL), start);
+    }
+    this.markTerrainCellUpdates(attribute, dirtyCells);
   }
 
   private vertexIsGreen(index: number): boolean {
@@ -1171,8 +1304,8 @@ export class TerrainSystem {
     worldZ: number,
     radius: number,
     tool: "paint-green" | "paint-yellow" | "paint-rock",
-  ): boolean {
-    let changed = false;
+  ): number[] {
+    const changedIndices: number[] = [];
     let rockChanged = false;
     const strokeGroup = tool === "paint-rock"
       ? (this.activeRockGroupId || this.nextRockGroupId++)
@@ -1195,17 +1328,17 @@ export class TerrainSystem {
         if (this.rockPaint[index] !== nextRock || this.rockGroups[index] !== nextGroup) rockChanged = true;
         this.rockPaint[index] = nextRock;
         this.rockGroups[index] = nextGroup;
-        changed = true;
+        changedIndices.push(index);
       }
     }
 
-    if (changed) {
+    if (changedIndices.length > 0) {
       if (rockChanged) {
         this.rockBodiesDirty = true;
       }
-      this.refreshTerrainColors();
+      this.refreshTerrainColorsForVertices(changedIndices);
     }
-    return changed;
+    return changedIndices;
   }
 
   private recalculateRange(): void {

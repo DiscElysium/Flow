@@ -13,7 +13,6 @@ import { OceanSystem } from "@/engine/water/OceanSystem";
 import { WaterShowcaseScene } from "@/engine/water/WaterShowcaseScene";
 
 const IRRIGATION_UPDATE_INTERVAL = 0.4;
-const WATER_SIMULATION_INTERVAL = 1 / 45;
 const PIXEL_RATIO_CHECK_INTERVAL = 2_000;
 const INTRO_CAMERA_DURATION_MS = 3_000;
 const PLAY_HOME_DISTANCE = 210;
@@ -70,7 +69,6 @@ export class AlpineWorld {
   private lastEditTime = 0;
   private lastFrameTime = performance.now();
   private pixelRatioCheckTime = performance.now();
-  private waterSimulationAccumulator = 0;
   private maxPixelRatio = 1;
   private renderPixelRatio = 1;
   private statsTime = 0;
@@ -241,7 +239,11 @@ export class AlpineWorld {
   }
 
   setFlowRate(rate: number): void {
-    this.flowRate = THREE.MathUtils.clamp(rate, 0.2, 10);
+    this.flowRate = THREE.MathUtils.clamp(
+      rate,
+      WORLD_CONFIG.water.minFlowRate,
+      WORLD_CONFIG.water.maxFlowRate,
+    );
   }
 
   setIrrigationRadius(radius: number): void {
@@ -709,7 +711,7 @@ export class AlpineWorld {
     if (!this.cursorPoint || now - this.lastEditTime < 28) return;
     const deltaTime = Math.min(0.05, Math.max(0.012, (now - this.lastEditTime) / 1000));
     this.lastEditTime = now;
-    const changed = this.terrain.applyBrush(
+    const changedIndices = this.terrain.applyBrush(
       this.cursorPoint.x,
       this.cursorPoint.z,
       this.tool,
@@ -718,12 +720,13 @@ export class AlpineWorld {
       deltaTime,
       !this.editMode,
     );
-    if (changed) {
+    if (changedIndices.length > 0) {
       this.editedInStroke = true;
       if (this.isPaintTool()) {
         this.scenery.updateTreeWatering((x, z) => this.terrain.isGreenAt(x, z));
+        if (this.tool === "paint-rock") this.water.syncTerrainDuringStroke(changedIndices);
       } else {
-        this.water.syncTerrain(true);
+        this.water.syncTerrainDuringStroke(changedIndices);
       }
     }
   }
@@ -784,11 +787,12 @@ export class AlpineWorld {
         if (this.tool === "paint-rock") {
           this.scenery.refreshHeights();
           this.models.refreshHeights();
-          this.water.syncTerrain(true);
+          this.water.finishTerrainStroke();
         }
       } else {
         this.scenery.refreshHeights();
         this.models.refreshHeights();
+        this.water.finishTerrainStroke();
       }
       this.handlers.onTerrainEdit?.();
     }
@@ -861,7 +865,8 @@ export class AlpineWorld {
   private animate = (time = performance.now()): void => {
     if (this.disposed) return;
     this.frame = requestAnimationFrame(this.animate);
-    const deltaTime = Math.min(0.05, Math.max(0.001, (time - this.lastFrameTime) / 1000));
+    const frameDeltaTime = Math.max(0, (time - this.lastFrameTime) / 1000);
+    const deltaTime = Math.min(0.05, Math.max(0.001, frameDeltaTime));
     this.lastFrameTime = time;
     const instantFps = 1 / deltaTime;
     this.fps = THREE.MathUtils.lerp(this.fps, instantFps, 0.06);
@@ -886,16 +891,7 @@ export class AlpineWorld {
       this.waterPulseRemaining = Math.max(0, this.waterPulseRemaining - deltaTime);
     }
     if (!this.showcaseActive && (this.waterActive || waterPulseActive) && !this.sourcePlacementActive) {
-      this.waterSimulationAccumulator = Math.min(
-        this.waterSimulationAccumulator + deltaTime,
-        WATER_SIMULATION_INTERVAL * 2,
-      );
-      while (this.waterSimulationAccumulator >= WATER_SIMULATION_INTERVAL) {
-        this.water.step(WATER_SIMULATION_INTERVAL, this.flowRate, this.flowDelay);
-        this.waterSimulationAccumulator -= WATER_SIMULATION_INTERVAL;
-      }
-    } else {
-      this.waterSimulationAccumulator = 0;
+      this.water.step(frameDeltaTime, this.flowRate, this.flowDelay);
     }
     if (this.showcaseActive) this.waterShowcase.update(time);
     else {
