@@ -463,7 +463,7 @@ export class TerrainSystem {
     geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3).setUsage(THREE.DynamicDrawUsage));
     geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3).setUsage(THREE.DynamicDrawUsage));
     geometry.computeVertexNormals();
-    geometry.getAttribute("normal").setUsage(THREE.DynamicDrawUsage);
+    (geometry.getAttribute("normal") as THREE.BufferAttribute).setUsage(THREE.DynamicDrawUsage);
     this.setConservativeTerrainBounds(geometry);
     this.mesh.geometry.dispose();
     this.mesh.geometry = geometry;

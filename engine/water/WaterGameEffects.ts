@@ -1,6 +1,8 @@
 import * as THREE from "three";
 import { WORLD_CONFIG } from "@/engine/config";
 import type { TerrainSystem } from "@/engine/terrain/TerrainSystem";
+import { RiverFlowRibbons } from "@/engine/water/RiverFlowRibbons";
+import type { VisualFlowField } from "@/engine/water/VisualFlowField";
 
 export type WaterEffectFields = {
   coverage: Uint8Array;
@@ -16,15 +18,18 @@ export type WaterEffectFields = {
   waterfallTarget: Int32Array;
 };
 
-type CrestBuffers = {
-  positions: number[];
-  phases: number[];
-  alongs: number[];
-  flows: number[];
-  speeds: number[];
+type CrestInstanceBuffers = {
   centers: number[];
+  flows: number[];
+  phases: number[];
+  speeds: number[];
   strengths: number[];
-  indices: number[];
+  lengths: number[];
+  widths: number[];
+  curves: number[];
+  heightDeltas: number[];
+  arcs: number[];
+  rotations: number[];
 };
 
 type SheetBuffers = {
@@ -65,38 +70,144 @@ type FoamAnchor = {
   unstableFrames: number;
 };
 
-const MAX_RIVER_CRESTS = 240;
-const MAX_TURBULENCE_CRESTS = 180;
-const MAX_LAKE_CRESTS = 80;
 const MAX_WATERFALLS = 6;
-const MAX_BUBBLES = 480;
-const MAX_FOAM_ANCHORS = 64;
+const INITIAL_BUBBLE_CAPACITY = 512;
 const WATERFALL_MIN_TOTAL_DROP = 3.6;
 const WATERFALL_MIN_AVERAGE_SLOPE = 1.15;
 const WATERFALL_SEARCH_CELLS = 6;
 const LAKE_EFFECT_BLEND_START = 0.52;
 const LAKE_EFFECT_BLEND_END = 0.78;
+const LAKE_WAVE_BLEND_START = 0.3;
+const LAKE_WAVE_BLEND_END = 0.62;
+const LAKE_WAVE_SHORE_DEPTH = 0.035;
+const LAKE_WAVE_FULL_DEPTH = 0.18;
+
+/**
+ * Reusable GPU instance storage for one family of low-poly crest ribbons.
+ * Capacity grows to fit every physically eligible crest; it never truncates
+ * the effect list to an arbitrary global count.
+ */
+class CrestInstancePool {
+  readonly mesh: THREE.Mesh<THREE.InstancedBufferGeometry, THREE.ShaderMaterial>;
+  private capacity = 0;
+
+  constructor(
+    private readonly segments: number,
+    material: THREE.ShaderMaterial,
+    name: string,
+  ) {
+    this.mesh = new THREE.Mesh(this.createGeometry(1), material);
+    this.mesh.name = name;
+    this.mesh.frustumCulled = false;
+    this.mesh.visible = false;
+    this.capacity = 1;
+  }
+
+  update(buffers: CrestInstanceBuffers): void {
+    const count = buffers.phases.length;
+    this.ensureCapacity(count);
+    const geometry = this.mesh.geometry;
+    this.writeAttribute(geometry, "instanceCenter", buffers.centers);
+    this.writeAttribute(geometry, "instanceFlow", buffers.flows);
+    this.writeAttribute(geometry, "instancePhase", buffers.phases);
+    this.writeAttribute(geometry, "instanceSpeed", buffers.speeds);
+    this.writeAttribute(geometry, "instanceStrength", buffers.strengths);
+    this.writeAttribute(geometry, "instanceLength", buffers.lengths);
+    this.writeAttribute(geometry, "instanceWidth", buffers.widths);
+    this.writeAttribute(geometry, "instanceCurve", buffers.curves);
+    this.writeAttribute(geometry, "instanceHeightDelta", buffers.heightDeltas);
+    this.writeAttribute(geometry, "instanceArc", buffers.arcs);
+    this.writeAttribute(geometry, "instanceRotation", buffers.rotations);
+    geometry.instanceCount = count;
+    this.mesh.visible = count > 0;
+  }
+
+  dispose(): void {
+    this.mesh.geometry.dispose();
+    this.mesh.material.dispose();
+  }
+
+  private ensureCapacity(required: number): void {
+    if (required <= this.capacity) return;
+    let nextCapacity = this.capacity;
+    while (nextCapacity < required) nextCapacity *= 2;
+    const previous = this.mesh.geometry;
+    this.mesh.geometry = this.createGeometry(nextCapacity);
+    previous.dispose();
+    this.capacity = nextCapacity;
+  }
+
+  private createGeometry(capacity: number): THREE.InstancedBufferGeometry {
+    const geometry = new THREE.InstancedBufferGeometry();
+    const positions = new Float32Array((this.segments + 1) * 2 * 3);
+    const indices: number[] = [];
+    for (let segment = 0; segment <= this.segments; segment += 1) {
+      const q = segment / this.segments;
+      const offset = segment * 6;
+      positions[offset] = q;
+      positions[offset + 2] = -1;
+      positions[offset + 3] = q;
+      positions[offset + 5] = 1;
+      if (segment >= this.segments) continue;
+      const a = segment * 2;
+      indices.push(a, a + 2, a + 1, a + 1, a + 2, a + 3);
+    }
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geometry.setIndex(indices);
+    const addAttribute = (name: string, itemSize: number): void => {
+      geometry.setAttribute(
+        name,
+        new THREE.InstancedBufferAttribute(new Float32Array(capacity * itemSize), itemSize)
+          .setUsage(THREE.DynamicDrawUsage),
+      );
+    };
+    addAttribute("instanceCenter", 3);
+    addAttribute("instanceFlow", 2);
+    addAttribute("instancePhase", 1);
+    addAttribute("instanceSpeed", 1);
+    addAttribute("instanceStrength", 1);
+    addAttribute("instanceLength", 1);
+    addAttribute("instanceWidth", 1);
+    addAttribute("instanceCurve", 1);
+    addAttribute("instanceHeightDelta", 1);
+    addAttribute("instanceArc", 1);
+    addAttribute("instanceRotation", 1);
+    geometry.instanceCount = 0;
+    return geometry;
+  }
+
+  private writeAttribute(
+    geometry: THREE.InstancedBufferGeometry,
+    name: string,
+    values: number[],
+  ): void {
+    const attribute = geometry.getAttribute(name) as THREE.InstancedBufferAttribute;
+    (attribute.array as Float32Array).set(values);
+    attribute.clearUpdateRanges();
+    if (values.length > 0) attribute.addUpdateRange(0, values.length);
+    attribute.needsUpdate = true;
+  }
+}
 
 /** Converts stable simulation fields into the approved low-poly water effects. */
 export class WaterGameEffects {
   private readonly group = new THREE.Group();
   private readonly timeUniform = { value: 0 };
-  private readonly riverMesh = new THREE.Mesh(new THREE.BufferGeometry(), this.createCrestMaterial("#eef7f2", false, false, 0.76));
-  private readonly turbulenceMesh = new THREE.Mesh(
-    new THREE.BufferGeometry(),
-    this.createCrestMaterial("#dceee9", false, false, 0.58, true),
-  );
-  private readonly lakeMesh = new THREE.Mesh(new THREE.BufferGeometry(), this.createCrestMaterial("#c7e6df", true, true, 0.5));
-  private readonly impactWaveMesh = new THREE.Mesh(new THREE.BufferGeometry(), this.createCrestMaterial("#eef7f3", true, false, 0.58));
+  private readonly riverCrests: CrestInstancePool;
+  private readonly turbulenceCrests: CrestInstancePool;
+  private readonly lakeCrests: CrestInstancePool;
+  private readonly impactWaveCrests: CrestInstancePool;
+  private readonly movingRiverRibbons: RiverFlowRibbons;
   private readonly waterfallMesh = new THREE.Mesh(new THREE.BufferGeometry(), this.createWaterfallMaterial());
   private readonly bubbleGeometry = new THREE.IcosahedronGeometry(1, 0);
-  private readonly bubbleLife = new THREE.InstancedBufferAttribute(new Float32Array(MAX_BUBBLES * 2), 2);
-  private readonly bubbleRadial = new THREE.InstancedBufferAttribute(new Float32Array(MAX_BUBBLES * 2), 2);
-  private readonly bubbleFlow = new THREE.InstancedBufferAttribute(new Float32Array(MAX_BUBBLES * 2), 2);
-  private readonly bubbleMotion = new THREE.InstancedBufferAttribute(new Float32Array(MAX_BUBBLES * 4), 4);
-  private readonly bubbleShape = new THREE.InstancedBufferAttribute(new Float32Array(MAX_BUBBLES * 4), 4);
+  private bubbleCapacity = INITIAL_BUBBLE_CAPACITY;
+  private bubbleLife = new THREE.InstancedBufferAttribute(new Float32Array(INITIAL_BUBBLE_CAPACITY * 2), 2);
+  private bubbleRadial = new THREE.InstancedBufferAttribute(new Float32Array(INITIAL_BUBBLE_CAPACITY * 2), 2);
+  private bubbleFlow = new THREE.InstancedBufferAttribute(new Float32Array(INITIAL_BUBBLE_CAPACITY * 2), 2);
+  private bubbleMotion = new THREE.InstancedBufferAttribute(new Float32Array(INITIAL_BUBBLE_CAPACITY * 4), 4);
+  private bubbleShape = new THREE.InstancedBufferAttribute(new Float32Array(INITIAL_BUBBLE_CAPACITY * 4), 4);
   private readonly bubbleMaterial = this.createBubbleMaterial();
-  private readonly bubbles = new THREE.InstancedMesh(this.bubbleGeometry, this.bubbleMaterial, MAX_BUBBLES);
+  private bubbles = new THREE.InstancedMesh(this.bubbleGeometry, this.bubbleMaterial, INITIAL_BUBBLE_CAPACITY);
   private readonly impacts: Impact[] = [];
   private readonly riverAnchors = new Map<number, RiverAnchor>();
   private readonly turbulenceAnchors = new Map<number, TurbulenceAnchor>();
@@ -104,39 +215,48 @@ export class WaterGameEffects {
   private readonly lakeAnchors = new Set<number>();
   private readonly matrix = new THREE.Matrix4();
 
-  constructor(private readonly scene: THREE.Scene, private readonly terrain: TerrainSystem) {
+  constructor(
+    private readonly scene: THREE.Scene,
+    private readonly terrain: TerrainSystem,
+    visualFlowField: VisualFlowField,
+  ) {
+    this.riverCrests = new CrestInstancePool(
+      5,
+      this.createCrestMaterial("#dceee9", false, false, 0.34),
+      "river-curve-crests",
+    );
+    this.turbulenceCrests = new CrestInstancePool(
+      4,
+      this.createCrestMaterial("#c9e4de", false, false, 0.3, true),
+      "turbulence-broken-crests",
+    );
+    this.lakeCrests = new CrestInstancePool(
+      16,
+      this.createCrestMaterial("#c7e6df", true, true, 0.5),
+      "lake-local-wavelets",
+    );
+    this.impactWaveCrests = new CrestInstancePool(
+      14,
+      this.createCrestMaterial("#eef7f3", true, false, 0.58),
+      "waterfall-impact-waves",
+    );
+    this.movingRiverRibbons = new RiverFlowRibbons(this.terrain, visualFlowField);
     this.group.name = "dynamic-water-effects";
-    this.riverMesh.name = "river-curve-crests";
-    this.turbulenceMesh.name = "turbulence-broken-crests";
-    this.lakeMesh.name = "lake-local-wavelets";
-    this.impactWaveMesh.name = "waterfall-impact-waves";
     this.waterfallMesh.name = "projected-waterfall-sheets";
-    this.riverMesh.renderOrder = 6;
-    this.turbulenceMesh.renderOrder = 8;
-    this.lakeMesh.renderOrder = 7;
+    this.riverCrests.mesh.renderOrder = 6;
+    this.turbulenceCrests.mesh.renderOrder = 8;
+    this.lakeCrests.mesh.renderOrder = 7;
     this.waterfallMesh.renderOrder = 7;
-    this.impactWaveMesh.renderOrder = 9;
-    this.bubbles.renderOrder = 10;
-    for (const [name, attribute] of [
-      ["bubbleLife", this.bubbleLife],
-      ["bubbleRadial", this.bubbleRadial],
-      ["bubbleFlow", this.bubbleFlow],
-      ["bubbleMotion", this.bubbleMotion],
-      ["bubbleShape", this.bubbleShape],
-    ] as const) {
-      attribute.setUsage(THREE.DynamicDrawUsage);
-      this.bubbleGeometry.setAttribute(name, attribute);
-    }
-    // 实例位置会随真实瀑布落点持续变化，不能使用初始单位几何的包围球裁剪。
-    this.bubbles.frustumCulled = false;
-    this.bubbles.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.bubbles.count = 0;
+    this.impactWaveCrests.mesh.renderOrder = 9;
+    this.attachBubbleAttributes();
+    this.configureBubbleMesh(this.bubbles);
     this.group.add(
-      this.riverMesh,
-      this.turbulenceMesh,
-      this.lakeMesh,
+      this.riverCrests.mesh,
+      this.movingRiverRibbons.mesh,
+      this.turbulenceCrests.mesh,
+      this.lakeCrests.mesh,
       this.waterfallMesh,
-      this.impactWaveMesh,
+      this.impactWaveCrests.mesh,
       this.bubbles,
     );
     this.scene.add(this.group);
@@ -144,40 +264,49 @@ export class WaterGameEffects {
 
   update(time: number): void {
     this.timeUniform.value = time * 0.001;
+    this.movingRiverRibbons.update(this.timeUniform.value);
   }
 
   rebuild(fields: WaterEffectFields): void {
-    const river = this.createCrestBuffers();
-    const turbulence = this.createCrestBuffers();
-    const lake = this.createCrestBuffers();
-    const impactWaves = this.createCrestBuffers();
+    const river = this.createCrestInstanceBuffers();
+    const turbulence = this.createCrestInstanceBuffers();
+    const lake = this.createCrestInstanceBuffers();
+    const impactWaves = this.createCrestInstanceBuffers();
     const sheets = this.createSheetBuffers();
     this.impacts.length = 0;
 
-    this.buildRiverCrests(fields, river);
+    // River highlights now move as independent objects along continuous
+    // streamlines. Keep the old anchor pool empty instead of drawing fixed
+    // per-cell strips whose directions disagree at bends.
+    this.riverAnchors.clear();
+    this.movingRiverRibbons.setFields(fields);
     this.buildTurbulenceCrests(fields, turbulence);
     this.buildLakeWavelets(fields, lake);
     this.buildFoamAnchors(fields);
     this.rebuildBubbles();
 
-    this.replaceCrestGeometry(this.riverMesh, river);
-    this.replaceCrestGeometry(this.turbulenceMesh, turbulence);
-    this.replaceCrestGeometry(this.lakeMesh, lake);
-    this.replaceCrestGeometry(this.impactWaveMesh, impactWaves);
+    this.riverCrests.update(river);
+    this.turbulenceCrests.update(turbulence);
+    this.lakeCrests.update(lake);
+    this.impactWaveCrests.update(impactWaves);
     this.replaceSheetGeometry(sheets);
   }
 
   dispose(): void {
     this.scene.remove(this.group);
-    for (const mesh of [this.riverMesh, this.turbulenceMesh, this.lakeMesh, this.impactWaveMesh, this.waterfallMesh]) {
-      mesh.geometry.dispose();
-      (mesh.material as THREE.Material).dispose();
-    }
+    this.riverCrests.dispose();
+    this.turbulenceCrests.dispose();
+    this.lakeCrests.dispose();
+    this.impactWaveCrests.dispose();
+    this.movingRiverRibbons.dispose();
+    this.waterfallMesh.geometry.dispose();
+    this.waterfallMesh.material.dispose();
+    this.bubbles.dispose();
     this.bubbleGeometry.dispose();
     this.bubbleMaterial.dispose();
   }
 
-  private buildRiverCrests(fields: WaterEffectFields, buffers: CrestBuffers): void {
+  private buildRiverCrests(fields: WaterEffectFields, buffers: CrestInstanceBuffers): void {
     const resolution = this.terrain.resolution;
     const resolutionZ = this.terrain.resolutionZ;
 
@@ -217,15 +346,16 @@ export class WaterGameEffects {
 
     // New crests still need to pass the stricter visual checks. Once admitted,
     // their anchor keeps identity, phase and lateral placement stable.
-    for (let z = 1; z < resolutionZ - 1 && this.riverAnchors.size < MAX_RIVER_CRESTS; z += 1) {
-      for (let x = 1; x < resolution - 1 && this.riverAnchors.size < MAX_RIVER_CRESTS; x += 1) {
+    for (let z = 1; z < resolutionZ - 1; z += 1) {
+      for (let x = 1; x < resolution - 1; x += 1) {
         const index = z * resolution + x;
         if (this.riverAnchors.has(index)) continue;
         const speed = fields.flowSpeed[index];
         const riverWeight = this.getRiverEffectWeight(fields.lakeFactor[index]);
         if (fields.coverage[index] < 150 || speed < 0.1 || riverWeight <= 0.01) continue;
-        const chance = 0.038 + speed * 0.085;
+        const chance = 0.024 + speed * 0.052;
         if (this.hash(x, z, 3) > chance) continue;
+        if (this.hasNearbyEffectAnchor(this.riverAnchors.keys(), x, z, 2)) continue;
         const directionLength = Math.hypot(fields.flowX[index], fields.flowZ[index]);
         if (directionLength < 0.08) continue;
 
@@ -240,7 +370,7 @@ export class WaterGameEffects {
         // 宽河继续限制在中央；窄河允许单侧有水，但会收紧横向偏移，避免线条跑到岸上。
         if (!bothSidesWet && !narrowChannel) continue;
 
-        const length = THREE.MathUtils.lerp(0.52, 1.08, speed) * THREE.MathUtils.lerp(0.86, 1.1, this.hash(x, z, 7));
+        const length = THREE.MathUtils.lerp(0.38, 0.78, speed) * THREE.MathUtils.lerp(0.9, 1.06, this.hash(x, z, 7));
         const endpointCells = Math.max(1, Math.ceil(length * 0.5 / this.terrain.cellSize));
         const startX = THREE.MathUtils.clamp(Math.round(x - direction.x * endpointCells), 1, resolution - 2);
         const startZ = THREE.MathUtils.clamp(Math.round(z - direction.y * endpointCells), 1, resolutionZ - 2);
@@ -259,9 +389,7 @@ export class WaterGameEffects {
       }
     }
 
-    let count = 0;
     for (const [index, anchor] of this.riverAnchors) {
-      if (count >= MAX_RIVER_CRESTS) break;
       const x = index % resolution;
       const z = Math.floor(index / resolution);
       const direction = new THREE.Vector2(anchor.directionX, anchor.directionZ);
@@ -269,8 +397,8 @@ export class WaterGameEffects {
       const center = this.gridPosition(x, z, fields.surfaceHeights[index] + 0.008);
       center.x += side.x * anchor.lateralOffset;
       center.z += side.y * anchor.lateralOffset;
-      const length = THREE.MathUtils.lerp(0.52, 1.08, anchor.speed) * THREE.MathUtils.lerp(0.86, 1.1, this.hash(x, z, 7));
-      const width = THREE.MathUtils.lerp(0.025, 0.07, this.hash(x, z, 11));
+      const length = THREE.MathUtils.lerp(0.38, 0.78, anchor.speed) * THREE.MathUtils.lerp(0.9, 1.06, this.hash(x, z, 7));
+      const width = THREE.MathUtils.lerp(0.012, 0.026, this.hash(x, z, 11));
       const riverWeight = this.getRiverEffectWeight(fields.lakeFactor[index]);
       this.appendCurveRibbon(
         buffers,
@@ -280,15 +408,13 @@ export class WaterGameEffects {
         width,
         this.hash(x, z, 17),
         fields,
-        8,
         anchor.speed,
         riverWeight,
       );
-      count += 1;
     }
   }
 
-  private buildTurbulenceCrests(fields: WaterEffectFields, buffers: CrestBuffers): void {
+  private buildTurbulenceCrests(fields: WaterEffectFields, buffers: CrestInstanceBuffers): void {
     const resolution = this.terrain.resolution;
     const resolutionZ = this.terrain.resolutionZ;
 
@@ -352,9 +478,9 @@ export class WaterGameEffects {
     candidates.sort((a, b) => fields.turbulence[b] - fields.turbulence[a]);
 
     for (const index of candidates) {
-      if (this.turbulenceAnchors.size >= MAX_TURBULENCE_CRESTS) break;
       const x = index % resolution;
       const z = Math.floor(index / resolution);
+      if (this.hasNearbyEffectAnchor(this.turbulenceAnchors.keys(), x, z, 2)) continue;
       const strength = THREE.MathUtils.smoothstep(fields.turbulence[index], 0.1, 0.82);
       const direction = this.resolveEffectDirection(index, fields);
       this.turbulenceAnchors.set(index, {
@@ -367,9 +493,7 @@ export class WaterGameEffects {
       });
     }
 
-    let count = 0;
     for (const [index, anchor] of this.turbulenceAnchors) {
-      if (count >= MAX_TURBULENCE_CRESTS) break;
       const x = index % resolution;
       const z = Math.floor(index / resolution);
       const direction = new THREE.Vector2(anchor.directionX, anchor.directionZ);
@@ -377,9 +501,9 @@ export class WaterGameEffects {
       const center = this.gridPosition(x, z, fields.surfaceHeights[index] + 0.034);
       center.x += side.x * anchor.lateralOffset;
       center.z += side.y * anchor.lateralOffset;
-      const length = THREE.MathUtils.lerp(0.24, 0.54, anchor.strength)
-        * THREE.MathUtils.lerp(0.84, 1.14, this.hash(x, z, 101));
-      const width = THREE.MathUtils.lerp(0.016, 0.038, this.hash(x, z, 103))
+      const length = THREE.MathUtils.lerp(0.18, 0.38, anchor.strength)
+        * THREE.MathUtils.lerp(0.9, 1.08, this.hash(x, z, 101));
+      const width = THREE.MathUtils.lerp(0.009, 0.021, this.hash(x, z, 103))
         * THREE.MathUtils.lerp(0.78, 1, anchor.strength);
       const riverWeight = this.getRiverEffectWeight(fields.lakeFactor[index]);
       this.appendCurveRibbon(
@@ -390,12 +514,10 @@ export class WaterGameEffects {
         width,
         this.hash(x, z, 107),
         fields,
-        5,
         anchor.speed,
         anchor.strength * riverWeight,
         0.034,
       );
-      count += 1;
     }
   }
 
@@ -446,7 +568,6 @@ export class WaterGameEffects {
     candidates.sort((a, b) => fields.foam[b] - fields.foam[a]);
 
     for (const index of candidates) {
-      if (this.foamAnchors.size >= MAX_FOAM_ANCHORS) break;
       const x = index % resolution;
       const z = Math.floor(index / resolution);
       if (this.hasNearbyFoamAnchor(x, z, 2)) continue;
@@ -461,9 +582,13 @@ export class WaterGameEffects {
     }
   }
 
-  private buildLakeWavelets(fields: WaterEffectFields, buffers: CrestBuffers): void {
+  private buildLakeWavelets(fields: WaterEffectFields, buffers: CrestInstanceBuffers): void {
     const resolution = this.terrain.resolution;
     const resolutionZ = this.terrain.resolutionZ;
+
+    // Restore the GitHub baseline's persistent anchors and admission rules.
+    // The dynamic instance pool remains, so restoring the fuller visual does
+    // not bring back per-rebuild geometry allocation or a global instance cap.
     for (const index of this.lakeAnchors) {
       const lakeWeight = this.getLakeEffectWeight(fields.lakeFactor[index]);
       if (
@@ -475,21 +600,22 @@ export class WaterGameEffects {
       }
     }
 
-    for (let z = 2; z < resolutionZ - 2 && this.lakeAnchors.size < MAX_LAKE_CRESTS; z += 1) {
-      for (let x = 2; x < resolution - 2 && this.lakeAnchors.size < MAX_LAKE_CRESTS; x += 1) {
+    for (let z = 2; z < resolutionZ - 2; z += 1) {
+      for (let x = 2; x < resolution - 2; x += 1) {
         const index = z * resolution + x;
+        if (this.lakeAnchors.has(index)) continue;
         const lake = fields.lakeFactor[index];
         const lakeWeight = this.getLakeEffectWeight(lake);
-        if (this.lakeAnchors.has(index)) continue;
         if (fields.coverage[index] < 175 || fields.depth[index] < 0.08 || lakeWeight <= 0.01) continue;
         if (this.hash(x, z, 23) > 0.032 + lake * 0.035) continue;
+        // Local spacing replaces only the old arbitrary total cap. It prevents
+        // overlapping duplicates while allowing any lake size to use the pool.
+        if (this.hasNearbyGridAnchor(this.lakeAnchors, x, z, 2)) continue;
         this.lakeAnchors.add(index);
       }
     }
 
-    let count = 0;
     for (const index of this.lakeAnchors) {
-        if (count >= MAX_LAKE_CRESTS) break;
         const x = index % resolution;
         const z = Math.floor(index / resolution);
         const lake = fields.lakeFactor[index];
@@ -499,7 +625,12 @@ export class WaterGameEffects {
         const arc = THREE.MathUtils.lerp(1.08, 1.55, this.hash(x, z, 37));
         const rotation = Math.PI * (0.86 + this.hash(x, z, 41) * 0.24);
         const direction = new THREE.Vector2(Math.cos(rotation), Math.sin(rotation));
-        const surfaceStrength = this.getLakeEffectWeight(lake);
+        const surfaceStrength = this.getLakeWaveWeight(lake)
+          * THREE.MathUtils.smoothstep(
+            fields.depth[index],
+            LAKE_WAVE_SHORE_DEPTH,
+            LAKE_WAVE_FULL_DEPTH,
+          );
         this.appendArcRibbon(
           buffers,
           center,
@@ -509,14 +640,13 @@ export class WaterGameEffects {
           0.055 + lake * 0.035,
           phase,
           direction,
-          16,
           surfaceStrength,
+          0.12,
         );
-        count += 1;
     }
   }
 
-  private buildWaterfalls(fields: WaterEffectFields, sheets: SheetBuffers, impactWaves: CrestBuffers): void {
+  private buildWaterfalls(fields: WaterEffectFields, sheets: SheetBuffers, impactWaves: CrestInstanceBuffers): void {
     const resolution = this.terrain.resolution;
     const resolutionZ = this.terrain.resolutionZ;
     type WaterfallCandidate = { index: number; target: number; energy: number; speed: number };
@@ -698,80 +828,54 @@ export class WaterGameEffects {
           0.055 + energy * 0.025,
           wavePhase,
           new THREE.Vector2(0, 0),
-          14,
         );
       }
     }
   }
 
   private appendCurveRibbon(
-    buffers: CrestBuffers,
+    buffers: CrestInstanceBuffers,
     center: THREE.Vector3,
     direction: THREE.Vector2,
     length: number,
     width: number,
     phase: number,
     fields: WaterEffectFields,
-    segments: number,
     speed: number,
     surfaceStrength: number,
     heightOffset = 0.008,
   ): void {
-    // Trace the ribbon through the vector field in both directions. A single
-    // centre-cell direction produces independent comma shapes; following the
-    // neighbouring cells makes one crest bend through a turn like a stream.
-    const points = Array.from({ length: segments + 1 }, () => new THREE.Vector2());
-    const middle = Math.floor(segments * 0.5);
-    const stepLength = length / segments;
-    points[middle].set(center.x, center.z);
-
-    const forward = direction.clone().normalize();
-    for (let i = middle + 1; i <= segments; i += 1) {
-      const previous = points[i - 1];
-      const sampled = this.sampleFlowDirection(previous.x, previous.y, fields, forward);
-      forward.lerp(sampled, 0.62).normalize();
-      points[i].copy(previous).addScaledVector(forward, stepLength);
-    }
-
-    const backward = direction.clone().normalize();
-    for (let i = middle - 1; i >= 0; i -= 1) {
-      const next = points[i + 1];
-      const sampled = this.sampleFlowDirection(next.x, next.y, fields, backward);
-      backward.lerp(sampled, 0.62).normalize();
-      points[i].copy(next).addScaledVector(backward, -stepLength);
-    }
-
-    const startIndex = buffers.positions.length / 3;
-    for (let i = 0; i <= segments; i += 1) {
-      const q = i / segments;
-      const previous = points[Math.max(0, i - 1)];
-      const next = points[Math.min(segments, i + 1)];
-      const tangent = next.clone().sub(previous);
-      if (tangent.lengthSq() < 0.000001) tangent.copy(direction);
-      else tangent.normalize();
-      const side = new THREE.Vector2(-tangent.y, tangent.x);
-      // Keep only a very small organic offset; the main curve now comes from
-      // the real flow field rather than an arbitrary sinusoidal bend.
-      const curl = Math.sin(q * Math.PI * 1.7 + phase * Math.PI * 2) * length * 0.018;
-      const halfWidth = width * Math.pow(Math.sin(q * Math.PI), 0.58);
-      const x = points[i].x + side.x * curl;
-      const z = points[i].y + side.y * curl;
-      const y = this.sampleSurface(x, z, fields) + heightOffset;
-      for (const sign of [1, -1]) {
-        buffers.positions.push(x + side.x * halfWidth * sign, y, z + side.y * halfWidth * sign);
-        buffers.phases.push(phase);
-        buffers.alongs.push(q);
-        buffers.flows.push(tangent.x, tangent.y);
-        buffers.speeds.push(speed);
-        buffers.centers.push(center.x, center.y, center.z);
-        buffers.strengths.push(surfaceStrength);
-      }
-    }
-    this.appendStripIndices(buffers.indices, startIndex, segments);
+    const flow = direction.clone().normalize();
+    const halfLength = length * 0.5;
+    const startX = center.x - flow.x * halfLength;
+    const startZ = center.z - flow.y * halfLength;
+    const endX = center.x + flow.x * halfLength;
+    const endZ = center.z + flow.y * halfLength;
+    const startDirection = this.sampleFlowDirection(startX, startZ, fields, flow);
+    const endDirection = this.sampleFlowDirection(endX, endZ, fields, flow);
+    const cross = (a: THREE.Vector2, b: THREE.Vector2): number => a.x * b.y - a.y * b.x;
+    const curve = THREE.MathUtils.clamp(
+      cross(startDirection, flow) + cross(flow, endDirection),
+      -1,
+      1,
+    );
+    const startY = this.sampleSurface(startX, startZ, fields) + heightOffset;
+    const endY = this.sampleSurface(endX, endZ, fields) + heightOffset;
+    buffers.centers.push(center.x, center.y, center.z);
+    buffers.flows.push(flow.x, flow.y);
+    buffers.phases.push(phase);
+    buffers.speeds.push(speed);
+    buffers.strengths.push(surfaceStrength);
+    buffers.lengths.push(length);
+    buffers.widths.push(width);
+    buffers.curves.push(curve);
+    buffers.heightDeltas.push(endY - startY);
+    buffers.arcs.push(0);
+    buffers.rotations.push(0);
   }
 
   private appendArcRibbon(
-    buffers: CrestBuffers,
+    buffers: CrestInstanceBuffers,
     center: THREE.Vector3,
     radius: number,
     arc: number,
@@ -779,31 +883,20 @@ export class WaterGameEffects {
     width: number,
     phase: number,
     direction: THREE.Vector2,
-    segments: number,
     surfaceStrength = 1,
     effectSpeed = 0.12,
   ): void {
-    const startIndex = buffers.positions.length / 3;
-    for (let i = 0; i <= segments; i += 1) {
-      const q = i / segments;
-      const angle = rotation + (q - 0.5) * arc;
-      const taper = Math.pow(Math.sin(q * Math.PI), 0.58);
-      const halfWidth = width * taper;
-      for (const radial of [radius - halfWidth, radius + halfWidth]) {
-        buffers.positions.push(
-          center.x + Math.cos(angle) * radial,
-          center.y,
-          center.z + Math.sin(angle) * radial,
-        );
-        buffers.phases.push(phase);
-        buffers.alongs.push(q);
-        buffers.flows.push(direction.x, direction.y);
-        buffers.speeds.push(effectSpeed);
-        buffers.centers.push(center.x, center.y, center.z);
-        buffers.strengths.push(surfaceStrength);
-      }
-    }
-    this.appendStripIndices(buffers.indices, startIndex, segments);
+    buffers.centers.push(center.x, center.y, center.z);
+    buffers.flows.push(direction.x, direction.y);
+    buffers.phases.push(phase);
+    buffers.speeds.push(effectSpeed);
+    buffers.strengths.push(surfaceStrength);
+    buffers.lengths.push(radius);
+    buffers.widths.push(width);
+    buffers.curves.push(0);
+    buffers.heightDeltas.push(0);
+    buffers.arcs.push(arc);
+    buffers.rotations.push(rotation);
   }
 
   private appendWaterfallSheet(
@@ -860,6 +953,15 @@ export class WaterGameEffects {
   }
 
   private rebuildBubbles(): void {
+    let requiredCapacity = 0;
+    for (const impact of this.impacts) {
+      requiredCapacity += Math.min(40, 20 + Math.round(impact.energy * 12 + impact.speed * 8));
+    }
+    for (const foam of this.foamAnchors.values()) {
+      requiredCapacity += 1 + Math.round(foam.strength * 3);
+    }
+    this.ensureBubbleCapacity(requiredCapacity);
+
     let cursor = 0;
     const writeBubble = (
       center: THREE.Vector3,
@@ -892,7 +994,7 @@ export class WaterGameEffects {
       // Store only stable spawn data. The shader owns age, spreading, rising,
       // scale and opacity for the entire lifetime of each low-poly lobe.
       const count = Math.min(40, 20 + Math.round(impact.energy * 12 + impact.speed * 8));
-      for (let i = 0; i < count && cursor < MAX_BUBBLES; i += 1) {
+      for (let i = 0; i < count; i += 1) {
         const phase = this.hash(impact.seed, i, 61);
         const lifetime = THREE.MathUtils.lerp(0.68, 1.45, this.hash(impact.seed, i, 67));
         const angle = this.hash(impact.seed, i, 71) * Math.PI * 2;
@@ -925,7 +1027,7 @@ export class WaterGameEffects {
       const directionLength = Math.hypot(foam.flowX, foam.flowZ);
       const directionX = directionLength > 0.001 ? foam.flowX / directionLength : 0;
       const directionZ = directionLength > 0.001 ? foam.flowZ / directionLength : 0;
-      for (let i = 0; i < count && cursor < MAX_BUBBLES; i += 1) {
+      for (let i = 0; i < count; i += 1) {
         const phase = this.hash(index, i, 109);
         const lifetime = THREE.MathUtils.lerp(0.85, 1.6, this.hash(index, i, 113));
         const angle = this.hash(index, i, 127) * Math.PI * 2;
@@ -962,6 +1064,49 @@ export class WaterGameEffects {
       this.bubbleMotion,
       this.bubbleShape,
     ]) attribute.needsUpdate = true;
+  }
+
+  private ensureBubbleCapacity(required: number): void {
+    if (required <= this.bubbleCapacity) return;
+    let nextCapacity = this.bubbleCapacity;
+    while (nextCapacity < required) nextCapacity *= 2;
+
+    const previous = this.bubbles;
+    this.group.remove(previous);
+    previous.dispose();
+    this.bubbleCapacity = nextCapacity;
+    this.bubbleLife = new THREE.InstancedBufferAttribute(new Float32Array(nextCapacity * 2), 2);
+    this.bubbleRadial = new THREE.InstancedBufferAttribute(new Float32Array(nextCapacity * 2), 2);
+    this.bubbleFlow = new THREE.InstancedBufferAttribute(new Float32Array(nextCapacity * 2), 2);
+    this.bubbleMotion = new THREE.InstancedBufferAttribute(new Float32Array(nextCapacity * 4), 4);
+    this.bubbleShape = new THREE.InstancedBufferAttribute(new Float32Array(nextCapacity * 4), 4);
+    this.attachBubbleAttributes();
+    this.bubbles = new THREE.InstancedMesh(this.bubbleGeometry, this.bubbleMaterial, nextCapacity);
+    this.configureBubbleMesh(this.bubbles);
+    this.group.add(this.bubbles);
+  }
+
+  private attachBubbleAttributes(): void {
+    for (const [name, attribute] of [
+      ["bubbleLife", this.bubbleLife],
+      ["bubbleRadial", this.bubbleRadial],
+      ["bubbleFlow", this.bubbleFlow],
+      ["bubbleMotion", this.bubbleMotion],
+      ["bubbleShape", this.bubbleShape],
+    ] as const) {
+      attribute.setUsage(THREE.DynamicDrawUsage);
+      this.bubbleGeometry.setAttribute(name, attribute);
+    }
+  }
+
+  private configureBubbleMesh(mesh: THREE.InstancedMesh): void {
+    mesh.name = "foam-bubbles";
+    mesh.renderOrder = 10;
+    // Instance positions follow the complete active foam field, so the unit
+    // geometry's original bounds cannot safely cull the pooled draw call.
+    mesh.frustumCulled = false;
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    mesh.count = 0;
   }
 
   private createBubbleMaterial(): THREE.ShaderMaterial {
@@ -1041,40 +1186,72 @@ export class WaterGameEffects {
       },
       vertexShader: `
         uniform float uTime;
-        attribute float effectPhase;
-        attribute float effectStrength;
-        attribute float effectSpeed;
-        attribute float effectAlong;
-        attribute vec2 effectFlow;
-        attribute vec3 effectCenter;
+        attribute vec3 instanceCenter;
+        attribute vec2 instanceFlow;
+        attribute float instancePhase;
+        attribute float instanceSpeed;
+        attribute float instanceStrength;
+        attribute float instanceLength;
+        attribute float instanceWidth;
+        attribute float instanceCurve;
+        attribute float instanceHeightDelta;
+        attribute float instanceArc;
+        attribute float instanceRotation;
         varying float vLife;
         varying float vTrail;
         varying float vStrength;
+        varying float vTone;
         void main() {
-          vec3 p = position;
+          float effectAlong = position.x;
+          float sideSign = position.z;
+          vec2 flowDirection = length(instanceFlow) > 0.001 ? normalize(instanceFlow) : vec2(0.7071, 0.7071);
+          vec2 sideDirection = vec2(-flowDirection.y, flowDirection.x);
+          float taper = pow(max(0.0, sin(effectAlong * 3.14159265)), 0.58);
+          vec3 p = instanceCenter;
+          if (instanceArc > 0.0001) {
+            float angle = instanceRotation + (effectAlong - 0.5) * instanceArc;
+            float radial = instanceLength + sideSign * instanceWidth * taper;
+            p.xz += vec2(cos(angle), sin(angle)) * radial;
+          } else {
+            float alongDistance = (effectAlong - 0.5) * instanceLength;
+            float bend = instanceCurve * instanceLength * pow(effectAlong - 0.5, 2.0) * 0.56;
+            float curl = sin(effectAlong * 5.3407075 + instancePhase * 6.2831853) * instanceLength * 0.018;
+            p.xz += flowDirection * alongDistance
+              + sideDirection * (bend + curl + sideSign * instanceWidth * taper);
+            p.y += (effectAlong - 0.5) * instanceHeightDelta;
+          }
           // River crests use the normalized speed recorded by their own water
           // cell. The UI dwell-time value is never passed to this material.
           // Keep lifecycle time independent from the changing cell speed: if
           // speed multiplies absolute uTime, every field refresh jumps the age
           // and therefore the alpha envelope, which reads as flicker.
-          float localFlowSpeed = clamp(effectSpeed, 0.0, 1.0);
+          float localFlowSpeed = clamp(instanceSpeed, 0.0, 1.0);
           float visibleFlowSpeed = smoothstep(0.05, 0.62, localFlowSpeed);
-          float age = fract(uTime * ${grow ? "0.18" : "0.14"} + effectPhase);
+          float age = fract(uTime * ${followLakeSurface ? "0.065" : grow ? "0.18" : "0.14"} + instancePhase);
           vLife = pow(sin(age * 3.14159265), 0.65);
-          vStrength = effectStrength;
+          vStrength = instanceStrength;
+          vTone = fract(instancePhase * 7.31 + instanceStrength * 0.37);
           float flowHead = 0.5 + (age - 0.5) * mix(0.55, 1.55, visibleFlowSpeed);
           vTrail = ${grow ? "1.0" : "1.0 - smoothstep(0.32, 0.58, abs(effectAlong - flowHead))"};
           ${grow
-            ? `p.xz = effectCenter.xz + (p.xz - effectCenter.xz) * (0.72 + age * 0.72) + effectFlow * (age - 0.22) * 0.55;${followLakeSurface ? "" : " p.y += sin(age * 3.14159265) * 0.025;"}`
+            ? `p.xz = instanceCenter.xz + (p.xz - instanceCenter.xz) * (0.72 + age * 0.72) + instanceFlow * (age - 0.22) * 0.55;${followLakeSurface ? "" : " p.y += sin(age * 3.14159265) * 0.025;"}`
             : ""}
-          vec2 flowDirection = length(effectFlow) > 0.001 ? normalize(effectFlow) : vec2(0.7071, 0.7071);
-          vec2 sideDirection = vec2(-flowDirection.y, flowDirection.x);
           float driftDistance = (age - 0.5) * mix(0.045, 0.34, visibleFlowSpeed);
-          float sideWave = sin(effectAlong * 8.0 - uTime * (0.32 + visibleFlowSpeed * 0.58) + effectPhase * 6.2831853)
-            * (0.006 + effectStrength * 0.018);
+          float sideWave = sin(effectAlong * 7.0 - uTime * (0.2 + visibleFlowSpeed * 0.3) + instancePhase * 6.2831853)
+            * (0.0025 + instanceStrength * 0.0075);
           p.xz += flowDirection * driftDistance + sideDirection * sideWave;
-          p.y += sin(age * 3.14159265) * (0.003 + effectStrength * 0.007);
+          p.y += sin(age * 3.14159265) * (0.003 + instanceStrength * 0.007);
           ${followLakeSurface ? `
+          float lakeSurfaceWaveA = sin(
+            dot(p.xz, normalize(vec2(0.88, 0.48))) * 0.4488
+            + uTime * 0.44
+          );
+          float lakeSurfaceWaveB = sin(
+            dot(p.xz, normalize(vec2(-0.35, 0.94))) * 0.2856
+            + uTime * 0.31
+            + 1.7
+          );
+          p.y += instanceStrength * (lakeSurfaceWaveA * 0.115 + lakeSurfaceWaveB * 0.055);
           float domainA = sin(dot(p.xz, normalize(vec2(-0.38, 0.92))) * 0.48 + uTime * 0.17);
           float domainB = sin(dot(p.xz, normalize(vec2(0.86, 0.51))) * 0.73 - uTime * 0.11 + 2.3);
           vec2 warped = p.xz + vec2(domainA * 0.42 + domainB * 0.18, domainB * 0.36 - domainA * 0.15);
@@ -1082,8 +1259,8 @@ export class WaterGameEffects {
           float waveB = sin(dot(warped, normalize(vec2(-0.27, 0.96))) * 1.78 - uTime * 0.57 + 1.7);
           float waveC = sin(dot(warped, normalize(vec2(0.72, -0.69))) * 2.46 - uTime * 0.83 + 3.1);
           float waveD = sin(dot(warped, normalize(vec2(-0.94, -0.34))) * 3.18 - uTime * 0.39 + 0.6);
-          float localWave = (waveA * 0.092 + waveB * 0.058 + waveC * 0.034 + waveD * 0.018) * effectStrength;
-          p.y += max(-0.055, localWave);` : ""}
+          float localWave = (waveA * 0.018 + waveB * 0.011 + waveC * 0.006 + waveD * 0.003) * instanceStrength;
+          p.y += max(-0.012, localWave);` : ""}
           gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
         }
       `,
@@ -1092,9 +1269,16 @@ export class WaterGameEffects {
         varying float vLife;
         varying float vTrail;
         varying float vStrength;
+        varying float vTone;
         void main() {
           float strengthAlpha = ${strengthDrivenAlpha ? "mix(0.35, 1.0, clamp(vStrength, 0.0, 1.0))" : "1.0"};
-          gl_FragColor = vec4(uColor, vLife * vTrail * strengthAlpha * ${opacity.toFixed(2)});
+          vec3 crestColor = mix(
+            uColor * 0.78,
+            mix(uColor, vec3(1.0), 0.2),
+            vTone
+          );
+          float toneAlpha = mix(0.62, 1.0, vTone);
+          gl_FragColor = vec4(crestColor, vLife * vTrail * strengthAlpha * toneAlpha * ${opacity.toFixed(2)});
         }
       `,
     });
@@ -1174,25 +1358,6 @@ export class WaterGameEffects {
     });
   }
 
-  private replaceCrestGeometry(mesh: THREE.Mesh, buffers: CrestBuffers): void {
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.Float32BufferAttribute(buffers.positions, 3));
-    geometry.setAttribute("effectPhase", new THREE.Float32BufferAttribute(buffers.phases, 1));
-    geometry.setAttribute("effectAlong", new THREE.Float32BufferAttribute(buffers.alongs, 1));
-    geometry.setAttribute("effectFlow", new THREE.Float32BufferAttribute(buffers.flows, 2));
-    geometry.setAttribute("effectSpeed", new THREE.Float32BufferAttribute(buffers.speeds, 1));
-    geometry.setAttribute("effectCenter", new THREE.Float32BufferAttribute(buffers.centers, 3));
-    geometry.setAttribute("effectStrength", new THREE.Float32BufferAttribute(buffers.strengths, 1));
-    geometry.setIndex(buffers.indices);
-    if (buffers.positions.length > 0) {
-      geometry.computeBoundingBox();
-      geometry.computeBoundingSphere();
-    }
-    mesh.geometry.dispose();
-    mesh.geometry = geometry;
-    mesh.visible = buffers.positions.length > 0;
-  }
-
   private replaceSheetGeometry(buffers: SheetBuffers): void {
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", new THREE.Float32BufferAttribute(buffers.positions, 3));
@@ -1213,15 +1378,20 @@ export class WaterGameEffects {
     this.waterfallMesh.visible = buffers.positions.length > 0;
   }
 
-  private appendStripIndices(indices: number[], start: number, segments: number): void {
-    for (let i = 0; i < segments; i += 1) {
-      const a = start + i * 2;
-      indices.push(a, a + 2, a + 1, a + 1, a + 2, a + 3);
-    }
-  }
-
-  private createCrestBuffers(): CrestBuffers {
-    return { positions: [], phases: [], alongs: [], flows: [], speeds: [], centers: [], strengths: [], indices: [] };
+  private createCrestInstanceBuffers(): CrestInstanceBuffers {
+    return {
+      centers: [],
+      flows: [],
+      phases: [],
+      speeds: [],
+      strengths: [],
+      lengths: [],
+      widths: [],
+      curves: [],
+      heightDeltas: [],
+      arcs: [],
+      rotations: [],
+    };
   }
 
   private createSheetBuffers(): SheetBuffers {
@@ -1350,9 +1520,14 @@ export class WaterGameEffects {
     return true;
   }
 
-  private hasNearbyFoamAnchor(x: number, z: number, cellRadius: number): boolean {
+  private hasNearbyEffectAnchor(
+    anchors: Iterable<number>,
+    x: number,
+    z: number,
+    cellRadius: number,
+  ): boolean {
     const resolution = this.terrain.resolution;
-    for (const index of this.foamAnchors.keys()) {
+    for (const index of anchors) {
       const anchorX = index % resolution;
       const anchorZ = Math.floor(index / resolution);
       if (Math.max(Math.abs(anchorX - x), Math.abs(anchorZ - z)) <= cellRadius) return true;
@@ -1360,11 +1535,43 @@ export class WaterGameEffects {
     return false;
   }
 
+  private hasNearbyGridAnchor(
+    anchors: ReadonlySet<number>,
+    x: number,
+    z: number,
+    cellRadius: number,
+  ): boolean {
+    const resolution = this.terrain.resolution;
+    const resolutionZ = this.terrain.resolutionZ;
+    for (let dz = -cellRadius; dz <= cellRadius; dz += 1) {
+      const sampleZ = z + dz;
+      if (sampleZ < 0 || sampleZ >= resolutionZ) continue;
+      for (let dx = -cellRadius; dx <= cellRadius; dx += 1) {
+        const sampleX = x + dx;
+        if (sampleX < 0 || sampleX >= resolution) continue;
+        if (anchors.has(sampleZ * resolution + sampleX)) return true;
+      }
+    }
+    return false;
+  }
+
+  private hasNearbyFoamAnchor(x: number, z: number, cellRadius: number): boolean {
+    return this.hasNearbyEffectAnchor(this.foamAnchors.keys(), x, z, cellRadius);
+  }
+
   private getLakeEffectWeight(lakeFactor: number): number {
     return THREE.MathUtils.smoothstep(
       lakeFactor,
       LAKE_EFFECT_BLEND_START,
       LAKE_EFFECT_BLEND_END,
+    );
+  }
+
+  private getLakeWaveWeight(lakeFactor: number): number {
+    return THREE.MathUtils.smoothstep(
+      lakeFactor,
+      LAKE_WAVE_BLEND_START,
+      LAKE_WAVE_BLEND_END,
     );
   }
 

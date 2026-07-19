@@ -62,8 +62,8 @@ export class AlpineWorld {
   private readonly waterProximity: Uint8Array;
   private waterActive = false;
   private waterPulseRemaining = 0;
-  private flowRate = 1;
-  private flowDelay = 0.1;
+  private flowRate: number = WORLD_CONFIG.water.defaultFlowRate;
+  private flowDelay: number = WORLD_CONFIG.water.defaultFlowDelay;
   private editing = false;
   private editedInStroke = false;
   private lastEditTime = 0;

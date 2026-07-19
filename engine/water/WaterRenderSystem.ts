@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { WORLD_CONFIG } from "@/engine/config";
 import type { TerrainSystem } from "@/engine/terrain/TerrainSystem";
 import { WaterGameEffects } from "@/engine/water/WaterGameEffects";
+import type { VisualFlowField } from "@/engine/water/VisualFlowField";
 
 type GeometryBuffers = {
   positions: number[];
@@ -29,6 +30,13 @@ const SHORE_SUPPORT_UNDERLAP_ALLOWANCE = 0.01;
 const TERRAIN_INTERSECTION_FEATHER = 0.004;
 const LAKE_BLEND_START = 0.52;
 const LAKE_BLEND_END = 0.78;
+const LAKE_WAVE_BLEND_START = 0.3;
+const LAKE_WAVE_BLEND_END = 0.62;
+// Calm lake geometry uses a separate real-time clock and fixed world-space
+// waves. Simulation flow rate can therefore change water coverage rapidly
+// without changing the wave phase or making the low-poly facets flicker.
+const LAKE_WAVE_SHORE_DEPTH = 0.035;
+const LAKE_WAVE_FULL_DEPTH = 0.18;
 // Calibrated against the featured map's visible water-depth distribution so
 // shallow channels, lake shelves, basin water, and the deepest cells do not
 // collapse into the same two colours.
@@ -89,12 +97,14 @@ export class WaterRenderSystem {
   private readonly surfaceStatePixelsB: Float32Array;
   private readonly surfaceStateTextureA: THREE.DataTexture;
   private readonly surfaceStateTextureB: THREE.DataTexture;
+  private readonly visualTimeUniform = { value: 0 };
   private readonly effects: WaterGameEffects;
 
   constructor(
     private readonly scene: THREE.Scene,
     private readonly terrain: TerrainSystem,
     private readonly visualCoverageTexture: THREE.DataTexture,
+    visualFlowField: VisualFlowField,
   ) {
     const stateValueCount = this.terrain.resolutionX * this.terrain.resolutionZ * 4;
     this.surfaceStatePixelsA = new Float32Array(stateValueCount);
@@ -121,10 +131,11 @@ export class WaterRenderSystem {
     this.waterfallMesh.receiveShadow = false;
     this.group.add(this.surfaceMesh, this.waterfallMesh);
     this.scene.add(this.group);
-    this.effects = new WaterGameEffects(this.scene, this.terrain);
+    this.effects = new WaterGameEffects(this.scene, this.terrain, visualFlowField);
   }
 
   update(time: number): void {
+    this.visualTimeUniform.value = time * 0.001;
     this.effects.update(time);
   }
 
@@ -241,6 +252,7 @@ export class WaterRenderSystem {
       shader.uniforms.uWaterCoverage = { value: this.visualCoverageTexture };
       shader.uniforms.uWaterStateA = { value: this.surfaceStateTextureA };
       shader.uniforms.uWaterStateB = { value: this.surfaceStateTextureB };
+      shader.uniforms.uWaterVisualTime = this.visualTimeUniform;
       shader.uniforms.uWaterWorldSize = { value: new THREE.Vector2(WORLD_CONFIG.sizeX, WORLD_CONFIG.sizeZ) };
       shader.uniforms.uWaterShoreColor = { value: this.shoreColor };
       shader.uniforms.uWaterShallowColor = { value: this.shallowColor };
@@ -255,6 +267,7 @@ export class WaterRenderSystem {
           uniform sampler2D uWaterCoverage;
           uniform sampler2D uWaterStateA;
           uniform sampler2D uWaterStateB;
+          uniform float uWaterVisualTime;
           uniform vec2 uWaterWorldSize;
           uniform vec3 uWaterShoreColor;
           uniform vec3 uWaterShallowColor;
@@ -267,6 +280,7 @@ export class WaterRenderSystem {
           varying float vWaterLake;
           varying float vWaterDepth;
           varying float vWaterTerrainClearance;
+          varying float vWaterLakeWave;
           varying vec3 vWaterWorldPosition;
 
           vec3 resolveWaterDepthColor(float depth) {
@@ -316,6 +330,34 @@ export class WaterRenderSystem {
           transformed.y = waterStateA.r;
           vWaterLake = waterLake;
           vWaterDepth = waterDepth;
+          // Keep almost the whole lake on one restrained amplitude. Only the
+          // shallow rim fades toward zero, so no arbitrary deep/high patch can
+          // dominate the lake. Both waves are continuous in world space and
+          // advance on real visual time rather than simulation flow rate.
+          float lakeWaveArea = smoothstep(
+            ${LAKE_WAVE_BLEND_START.toFixed(2)},
+            ${LAKE_WAVE_BLEND_END.toFixed(2)},
+            waterLake
+          );
+          float lakeShoreFade = smoothstep(
+            ${LAKE_WAVE_SHORE_DEPTH.toFixed(3)},
+            ${LAKE_WAVE_FULL_DEPTH.toFixed(3)},
+            waterDepth
+          );
+          vec2 lakeWaveWorldXZ = (modelMatrix * vec4(transformed, 1.0)).xz;
+          float lakeWaveA = sin(
+            dot(lakeWaveWorldXZ, normalize(vec2(0.88, 0.48))) * 0.4488
+            + uWaterVisualTime * 0.44
+          );
+          float lakeWaveB = sin(
+            dot(lakeWaveWorldXZ, normalize(vec2(-0.35, 0.94))) * 0.2856
+            + uWaterVisualTime * 0.31
+            + 1.7
+          );
+          float lakeWaveOffset = lakeWaveArea * lakeShoreFade
+            * (lakeWaveA * 0.115 + lakeWaveB * 0.055);
+          transformed.y += lakeWaveOffset;
+          vWaterLakeWave = lakeWaveOffset;
           float waterVisualDepth = max(0.0, waterTerrainClearance - waterSurfaceOffset);
           vColor = vec4(resolveWaterDepthColor(waterVisualDepth), 1.0);
           vWaterTerrainClearance = waterTerrainClearance;
@@ -347,16 +389,29 @@ export class WaterRenderSystem {
           if (terrainIntersectionCoverage < 0.012) discard;
           diffuseColor.a *= terrainIntersectionCoverage;
           diffuseColor.a *= waterEdgeCoverage;
-          float lakeWeight = smoothstep(${LAKE_BLEND_START.toFixed(2)}, ${LAKE_BLEND_END.toFixed(2)}, vWaterLake);
+          float lakeWeight = smoothstep(${LAKE_WAVE_BLEND_START.toFixed(2)}, ${LAKE_WAVE_BLEND_END.toFixed(2)}, vWaterLake);
           vec3 waterDx = dFdx(vWaterWorldPosition);
           vec3 waterDy = dFdy(vWaterWorldPosition);
           vec3 waterDynamicNormal = normalize(cross(waterDx, waterDy));
           if (waterDynamicNormal.y < 0.0) waterDynamicNormal *= -1.0;
-          float waterNormalStability = mix(0.72, 0.9, lakeWeight);
+          float waterNormalStability = mix(0.72, 0.62, lakeWeight);
           waterDynamicNormal = normalize(mix(waterDynamicNormal, vec3(0.0, 1.0, 0.0), waterNormalStability));
           vec3 waterViewDirection = normalize(cameraPosition - vWaterWorldPosition);
           float waterFresnel = pow(1.0 - clamp(dot(waterDynamicNormal, waterViewDirection), 0.0, 1.0), 2.2);
           diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.31, 0.56, 0.59), waterFresnel * 0.2);
+          // Preserve the depth-derived hue, then layer inexpensive faceted
+          // lighting over it. This uses the normal and wave height already in
+          // the shader: no extra textures, render pass, or CPU work.
+          vec3 lakeLightDirection = normalize(vec3(-0.45, 0.78, 0.38));
+          float lakeFacetLight = smoothstep(
+            0.76,
+            0.88,
+            dot(waterDynamicNormal, lakeLightDirection)
+          );
+          float lakeHeightLight = smoothstep(-0.09, 0.09, vWaterLakeWave);
+          float lakeSurfaceLight = lakeFacetLight * 0.68 + lakeHeightLight * 0.32;
+          float lakeLightMultiplier = mix(0.9, 1.14, lakeSurfaceLight);
+          diffuseColor.rgb *= mix(1.0, lakeLightMultiplier, lakeWeight);
           float depthOpacity = smoothstep(0.025, 1.35, vWaterDepth);
           diffuseColor.a *= mix(0.58, 0.96, depthOpacity);`;
 
@@ -369,13 +424,14 @@ export class WaterRenderSystem {
           varying float vWaterLake;
           varying float vWaterDepth;
           varying float vWaterTerrainClearance;
+          varying float vWaterLakeWave;
           varying vec3 vWaterWorldPosition;`,
         )
         .replace(
           "#include <normal_fragment_begin>",
           `#include <normal_fragment_begin>
-          ${waterfall ? "" : `float lakeLightingWeight = smoothstep(${LAKE_BLEND_START.toFixed(2)}, ${LAKE_BLEND_END.toFixed(2)}, vWaterLake);
-          float waterLightingStability = mix(0.72, 0.9, lakeLightingWeight);
+          ${waterfall ? "" : `float lakeLightingWeight = smoothstep(${LAKE_WAVE_BLEND_START.toFixed(2)}, ${LAKE_WAVE_BLEND_END.toFixed(2)}, vWaterLake);
+          float waterLightingStability = mix(0.72, 0.62, lakeLightingWeight);
           vec3 stableWaterViewNormal = normalize((viewMatrix * vec4(0.0, 1.0, 0.0, 0.0)).xyz);
           normal = normalize(mix(normal, stableWaterViewNormal, waterLightingStability));`}`,
         )
@@ -385,7 +441,7 @@ export class WaterRenderSystem {
           ${motionCode}`,
         );
     };
-    material.customProgramCacheKey = () => waterfall ? "waterfall-motion-v9" : "surface-motion-v10";
+    material.customProgramCacheKey = () => waterfall ? "waterfall-motion-v9" : "surface-motion-v20-lake-facets-017";
   }
 
   private createSurfaceStateTexture(data: Float32Array, name: string): THREE.DataTexture {

@@ -3,6 +3,7 @@ import { WORLD_CONFIG } from "@/engine/config";
 import type { TerrainSystem } from "@/engine/terrain/TerrainSystem";
 import { isOceanOutflowPosition } from "@/engine/water/OceanSystem";
 import { WATER_SHORE_ISO_LEVEL, WaterRenderSystem } from "@/engine/water/WaterRenderSystem";
+import { VisualFlowField } from "@/engine/water/VisualFlowField";
 
 const MIN_VISIBLE_DEPTH = 0.003;
 const VISUAL_EDGE_DEPTH = 0.0015;
@@ -156,6 +157,7 @@ export class WaterSimulation {
   /** 最终交给独立水网格的高度；只由前后物理状态插值，不再受覆盖遮罩二次改写。 */
   private readonly renderSurfaceHeight = new Float32Array(this.depth.length);
   private readonly visualCoverageTexture: THREE.DataTexture;
+  private readonly visualFlowField: VisualFlowField;
   private readonly renderSystem: WaterRenderSystem;
   private readonly marker = new THREE.Group();
   private physicsAccumulator = 0;
@@ -192,6 +194,7 @@ export class WaterSimulation {
     this.visualCoverageTexture.wrapT = THREE.ClampToEdgeWrapping;
     this.visualCoverageTexture.generateMipmaps = false;
     this.visualCoverageTexture.needsUpdate = true;
+    this.visualFlowField = new VisualFlowField(this.terrain);
     const material = new THREE.ShaderMaterial({
       transparent: true,
       depthWrite: true,
@@ -282,7 +285,12 @@ export class WaterSimulation {
     this.mesh.renderOrder = 3;
     // 原地形贴皮只保留为暂时的数据载体，不再参与绘制。
     this.mesh.visible = false;
-    this.renderSystem = new WaterRenderSystem(this.scene, this.terrain, this.visualCoverageTexture);
+    this.renderSystem = new WaterRenderSystem(
+      this.scene,
+      this.terrain,
+      this.visualCoverageTexture,
+      this.visualFlowField,
+    );
 
     this.rebuildFlowTerrainHeightCache();
     this.previousTerrain.set(this.terrain.heights);
@@ -1164,6 +1172,15 @@ export class WaterSimulation {
   }
 
   private updateFlowState(deltaTime: number): void {
+    this.visualFlowField.update(deltaTime, {
+      depth: this.depth,
+      edgeFluxX: this.flowAccumX,
+      edgeFluxZ: this.flowAccumZ,
+      outgoingFlux: this.outflowAccum,
+      incomingFlux: this.incomingAccum,
+      updatedCellMarks: this.frameFlowCellMarks,
+      updatedCellMark: this.frameFlowCellMark,
+    });
     const directionResponse = 1 - Math.exp(-deltaTime * 12);
     const energyResponse = 1 - Math.exp(-deltaTime * 8);
     const lakeShapeResponse = 1 - Math.exp(-deltaTime * 4);
@@ -1458,6 +1475,7 @@ export class WaterSimulation {
     this.lakeFactor.fill(0);
     this.waterfallEnergy.fill(0);
     this.waterfallTarget.fill(-1);
+    this.visualFlowField.clear();
     this.resetFrameAccumulators();
   }
 

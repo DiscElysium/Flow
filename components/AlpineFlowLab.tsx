@@ -161,9 +161,9 @@ export function AlpineFlowLab() {
   const [brushRadius, setBrushRadius] = useState<number>(WORLD_CONFIG.brush.radius);
   const [brushStrength, setBrushStrength] = useState<number>(WORLD_CONFIG.brush.strength);
   const [waterActive, setWaterActive] = useState(false);
-  const [flowRate, setFlowRate] = useState(1);
-  const [irrigationRadius, setIrrigationRadius] = useState(3);
-  const [flowDelay, setFlowDelay] = useState(0.1);
+  const [flowRate, setFlowRate] = useState<number>(WORLD_CONFIG.water.defaultFlowRate);
+  const [irrigationRadius, setIrrigationRadius] = useState<number>(WORLD_CONFIG.water.irrigationRadius);
+  const [flowDelay, setFlowDelay] = useState<number>(WORLD_CONFIG.water.defaultFlowDelay);
   const [showcaseActive, setShowcaseActive] = useState(false);
   const [placingWaterSource, setPlacingWaterSource] = useState(false);
   const [stats, setStats] = useState<WorldStats>(initialStats);
